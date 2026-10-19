@@ -195,6 +195,39 @@ ieee80211_add_vhtcaps(u_int8_t *frm, struct ieee80211com *ic)
 }
 
 /*
+ * Add an HE Capabilities element (802.11ax 9.4.2.248).  It is carried
+ * in the Element ID Extension element (EID 255) with extension ID 35.
+ * The MCS NSS sets for 160 MHz and 80+80 MHz follow the 80 MHz set only
+ * when the PHY capabilities advertise those widths.
+ */
+static u_int8_t *
+ieee80211_add_hecaps(u_int8_t *frm, struct ieee80211com *ic)
+{
+	u_int8_t phycap0 = ic->ic_he_phy_cap[0];
+
+	*frm++ = IEEE80211_ELEMID_EXTENSION;
+	*frm++ = 1 + IEEE80211_HE_CAPS_FIXED_LEN +
+	    IEEE80211_HE_MCS_NSS_SIZE(phycap0);
+	*frm++ = IEEE80211_ELEMID_EXT_HECAPS;
+	memcpy(frm, ic->ic_he_mac_cap, IEEE80211_HE_MAC_CAPS_LEN);
+	frm += IEEE80211_HE_MAC_CAPS_LEN;
+	memcpy(frm, ic->ic_he_phy_cap, IEEE80211_HE_PHY_CAPS_LEN);
+	frm += IEEE80211_HE_PHY_CAPS_LEN;
+
+	le16enc(frm, ic->ic_he_rxmcs_80); frm += 2;
+	le16enc(frm, ic->ic_he_txmcs_80); frm += 2;
+	if (phycap0 & IEEE80211_HE_PHYCAP0_CHAN_WIDTH_160_IN_5G) {
+		le16enc(frm, ic->ic_he_rxmcs_160); frm += 2;
+		le16enc(frm, ic->ic_he_txmcs_160); frm += 2;
+	}
+	if (phycap0 & IEEE80211_HE_PHYCAP0_CHAN_WIDTH_8080_IN_5G) {
+		le16enc(frm, ic->ic_he_rxmcs_80p80); frm += 2;
+		le16enc(frm, ic->ic_he_txmcs_80p80); frm += 2;
+	}
+	return frm;
+}
+
+/*
  * Send a management frame to the specified node.  The node pointer
  * must have a reference as the pointer will be passed to the driver
  * and potentially held for a long time.  If the frame is successfully
@@ -1703,6 +1736,9 @@ ieee80211_send_mgmt(struct ieee80211com *ic, struct ieee80211_node *ni,
 		       + sizeof(struct ieee80211_wme_info)
 		       + (ic->ic_htcaps != 0 ? 2 + 26 : 0)
 		       + (ic->ic_vhtcaps != 0 ? 2 + 12 : 0)
+		       + (IEEE80211_HE_CAPABLE(ic) ? 2 + 1 +
+			   IEEE80211_HE_CAPS_FIXED_LEN +
+			   IEEE80211_HE_MCS_NSS_SIZE(ic->ic_he_phy_cap[0]) : 0)
 		       + (ic->ic_opt_ie != NULL ? ic->ic_opt_ie_len : 0)
 		);
 		if (m == NULL)
@@ -1744,6 +1780,8 @@ ieee80211_send_mgmt(struct ieee80211com *ic, struct ieee80211_node *ni,
 		if (ic->ic_htcaps != 0 && ic->ic_vhtcaps != 0 &&
 		    IEEE80211_IS_CHAN_5GHZ(ni->ni_chan))
 			frm = ieee80211_add_vhtcaps(frm, ic);
+		if (IEEE80211_HE_CAPABLE(ic))
+			frm = ieee80211_add_hecaps(frm, ic);
 		if ((ic->ic_flags & IEEE80211_F_WME) && ni->ni_wme_ie != NULL)
 			frm = ieee80211_add_wme_info(frm, &ic->ic_wme);
 		if (ic->ic_opt_ie != NULL) {
