@@ -93,7 +93,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "bpfilter.h"
 
 #include <sys/param.h>
 #include <sys/malloc.h>
@@ -104,10 +103,10 @@
 #include <sys/systm.h>
 #include <sys/endian.h>
 
-#include <sys/refcnt.h>
-#include <sys/task.h>
-#include <machine/bus.h>
-#include <machine/intr.h>
+#include <sys/bus.h>
+#include <sys/intr.h>
+
+#include "if_iwx_compat.h"
 
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
@@ -120,18 +119,16 @@
 #include <net/if_media.h>
 
 #include <netinet/in.h>
-#include <netinet/if_ether.h>
+#include <net/if_ether.h>
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_radiotap.h>
-#include <net80211/ieee80211_priv.h> /* for SEQ_LT */
-#undef DPRINTF /* defined in ieee80211_priv.h */
 
 #define DEVNAME(_s)	((_s)->sc_dev.dv_xname)
 
 #define IC2IFP(_ic_) (&(_ic_)->ic_if)
 
-#define le16_to_cpup(_a_) (le16toh(*(const uint16_t *)(_a_)))
+#define le16dec(_a_) (le16toh(*(const uint16_t *)(_a_)))
 #define le32_to_cpup(_a_) (le32toh(*(const uint32_t *)(_a_)))
 
 #ifdef IWX_DEBUG
@@ -614,7 +611,7 @@ iwx_ctxt_info_free_paging(struct iwx_softc *sc)
 	for (i = 0; i < dram->paging_cnt; i++)
 		iwx_dma_contig_free(&dram->paging[i]);
 
-	free(dram->paging, M_DEVBUF, dram->paging_cnt * sizeof(*dram->paging));
+	iwx_free(dram->paging, M_DEVBUF, dram->paging_cnt * sizeof(*dram->paging));
 	dram->paging_cnt = 0;
 	dram->paging = NULL;
 }
@@ -1112,7 +1109,7 @@ iwx_ctxt_info_free_fw_img(struct iwx_softc *sc)
 	for (i = 0; i < dram->lmac_cnt + dram->umac_cnt; i++)
 		iwx_dma_contig_free(&dram->fw[i]);
 
-	free(dram->fw, M_DEVBUF,
+	iwx_free(dram->fw, M_DEVBUF,
 	    (dram->lmac_cnt + dram->umac_cnt) * sizeof(*dram->fw));
 	dram->lmac_cnt = 0;
 	dram->umac_cnt = 0;
@@ -1180,15 +1177,15 @@ iwx_set_default_calib(struct iwx_softc *sc, const void *data)
 void
 iwx_fw_info_free(struct iwx_fw_info *fw)
 {
-	free(fw->fw_rawdata, M_DEVBUF, fw->fw_rawsize);
+	iwx_free(fw->fw_rawdata, M_DEVBUF, fw->fw_rawsize);
 	fw->fw_rawdata = NULL;
 	fw->fw_rawsize = 0;
 	/* don't touch fw->fw_status */
 	memset(fw->fw_sects, 0, sizeof(fw->fw_sects));
-	free(fw->iml, M_DEVBUF, fw->iml_len);
+	iwx_free(fw->iml, M_DEVBUF, fw->iml_len);
 	fw->iml = NULL;
 	fw->iml_len = 0;
-	free(fw->pnvm, M_DEVBUF, fw->pnvm_len);
+	iwx_free(fw->pnvm, M_DEVBUF, fw->pnvm_len);
 	fw->pnvm = NULL;
 	fw->pnvm_len = 0;
 }
@@ -1526,7 +1523,7 @@ iwx_read_firmware(struct iwx_softc *sc)
 
 		case IWX_UCODE_TLV_IML:
 			if (sc->sc_fw.iml != NULL) {
-				free(fw->iml, M_DEVBUF, fw->iml_len);
+				iwx_free(fw->iml, M_DEVBUF, fw->iml_len);
 				fw->iml_len = 0;
 			}
 			sc->sc_fw.iml = malloc(tlv_len, M_DEVBUF,
@@ -3182,7 +3179,7 @@ iwx_init_channel_map(struct iwx_softc *sc, uint16_t *channel_profile_v3,
 		if (channel_profile_v4)
 			ch_flags = le32_to_cpup(channel_profile_v4 + ch_idx);
 		else
-			ch_flags = le16_to_cpup(channel_profile_v3 + ch_idx);
+			ch_flags = le16dec(channel_profile_v3 + ch_idx);
 
 		/* net80211 cannot handle 6 GHz channel numbers yet */
 		if (ch_idx >= IWX_NUM_2GHZ_CHANNELS + IWX_NUM_5GHZ_CHANNELS)
@@ -4237,8 +4234,8 @@ iwx_pnvm_handle_section(struct iwx_softc *sc, const uint8_t *data,
 			if (hw_match)
 				break;
 
-			mac_type = le16_to_cpup((const uint16_t *)data);
-			rf_id = le16_to_cpup((const uint16_t *)(data +
+			mac_type = le16dec((const uint16_t *)data);
+			rf_id = le16dec((const uint16_t *)(data +
 			    sizeof(uint16_t)));
 
 			if (mac_type == IWX_CSR_HW_REV_TYPE(sc->sc_hw_rev) &&
@@ -4302,7 +4299,7 @@ done:
 	sc->sc_pnvm_ver = sha1;
 out:
 	for (i = 0; i < pnvm_segs; i++)
-		free(pnvm_data[i], M_DEVBUF, pnvm_size[i]);
+		iwx_free(pnvm_data[i], M_DEVBUF, pnvm_size[i]);
 	return err;
 }
 
@@ -4407,7 +4404,7 @@ iwx_load_pnvm(struct iwx_softc *sc)
 
 				err = iwx_pnvm_parse(sc, pnvm_data, pnvm_size);
 				if (err && err != ENOENT) {
-					free(pnvm_data, M_DEVBUF, pnvm_size);
+					iwx_free(pnvm_data, M_DEVBUF, pnvm_size);
 					return err;
 				}
 			}
@@ -4419,7 +4416,7 @@ iwx_load_pnvm(struct iwx_softc *sc)
 
 	if (!iwx_nic_lock(sc)) {
 		splx(s);
-		free(pnvm_data, M_DEVBUF, pnvm_size);
+		iwx_free(pnvm_data, M_DEVBUF, pnvm_size);
 		return EBUSY;
 	}
 
@@ -4441,7 +4438,7 @@ iwx_load_pnvm(struct iwx_softc *sc)
 
 	splx(s);
 	iwx_nic_unlock(sc);
-	free(pnvm_data, M_DEVBUF, pnvm_size);
+	iwx_free(pnvm_data, M_DEVBUF, pnvm_size);
 	return err;
 }
 
@@ -5978,7 +5975,7 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
 			hcmd->resp_pkt = (void *)sc->sc_cmd_resp_pkt[idx];
 			sc->sc_cmd_resp_pkt[idx] = NULL;
 		} else if (generation == sc->sc_generation) {
-			free(sc->sc_cmd_resp_pkt[idx], M_DEVBUF,
+			iwx_free(sc->sc_cmd_resp_pkt[idx], M_DEVBUF,
 			    sc->sc_cmd_resp_len[idx]);
 			sc->sc_cmd_resp_pkt[idx] = NULL;
 		}
@@ -6052,7 +6049,7 @@ void
 iwx_free_resp(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
 {
 	KASSERT((hcmd->flags & (IWX_CMD_WANT_RESP)) == IWX_CMD_WANT_RESP);
-	free(hcmd->resp_pkt, M_DEVBUF, hcmd->resp_pkt_len);
+	iwx_free(hcmd->resp_pkt, M_DEVBUF, hcmd->resp_pkt_len);
 	hcmd->resp_pkt = NULL;
 }
 
@@ -7721,7 +7718,7 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
 
 	err = iwx_fill_probe_req(sc, &scan_p->probe_params.preq);
 	if (err) {
-		free(cmd, M_DEVBUF, sizeof(*cmd));
+		iwx_free(cmd, M_DEVBUF, sizeof(*cmd));
 		return err;
 	}
 
@@ -7742,7 +7739,7 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
 	hcmd.flags |= async ? IWX_CMD_ASYNC : 0;
 
 	err = iwx_send_cmd(sc, &hcmd);
-	free(cmd, M_DEVBUF, sizeof(*cmd));
+	iwx_free(cmd, M_DEVBUF, sizeof(*cmd));
 	return err;
 }
 
@@ -7781,7 +7778,7 @@ iwx_umac_scan_v17(struct iwx_softc *sc, int bgscan)
 
 	err = iwx_fill_probe_req(sc, &scan_p->probe_params.preq);
 	if (err) {
-		free(cmd, M_DEVBUF, sizeof(*cmd));
+		iwx_free(cmd, M_DEVBUF, sizeof(*cmd));
 		return err;
 	}
 
@@ -7802,7 +7799,7 @@ iwx_umac_scan_v17(struct iwx_softc *sc, int bgscan)
 	hcmd.flags |= async ? IWX_CMD_ASYNC : 0;
 
 	err = iwx_send_cmd(sc, &hcmd);
-	free(cmd, M_DEVBUF, sizeof(*cmd));
+	iwx_free(cmd, M_DEVBUF, sizeof(*cmd));
 	return err;
 }
 
@@ -8343,7 +8340,7 @@ iwx_bgscan_done(struct ieee80211com *ic,
 {
 	struct iwx_softc *sc = ic->ic_softc;
 
-	free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
+	iwx_free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
 	sc->bgscan_unref_arg = arg;
 	sc->bgscan_unref_arg_size = arg_size;
 	iwx_add_task(sc, systq, &sc->bgscan_done_task);
@@ -8440,7 +8437,7 @@ iwx_bgscan_done_task(void *arg)
 		ieee80211_node_tx_stopped(ic, &in->in_ni);
 done:
 	if (err) {
-		free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
+		iwx_free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
 		sc->bgscan_unref_arg = NULL;
 		sc->bgscan_unref_arg_size = 0;
 		if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
@@ -10216,7 +10213,7 @@ iwx_allow_mcast(struct iwx_softc *sc)
 
 	err = iwx_send_cmd_pdu(sc, IWX_MCAST_FILTER_CMD,
 	    0, size, cmd);
-	free(cmd, M_DEVBUF, size);
+	iwx_free(cmd, M_DEVBUF, size);
 	return err;
 }
 
@@ -10227,7 +10224,7 @@ iwx_init(struct ifnet *ifp)
 	struct ieee80211com *ic = &sc->sc_ic;
 	int err, generation;
 
-	rw_assert_wrlock(&sc->ioctl_rwl);
+	KASSERT(rw_write_held(&sc->ioctl_rwl));
 
 	generation = ++sc->sc_generation;
 
@@ -10404,7 +10401,7 @@ iwx_stop(struct ifnet *ifp)
 	struct iwx_node *in = (void *)ic->ic_bss;
 	int i, s = splnet();
 
-	rw_assert_wrlock(&sc->ioctl_rwl);
+	KASSERT(rw_write_held(&sc->ioctl_rwl));
 
 	sc->sc_flags |= IWX_FLAG_SHUTDOWN; /* Disallow new tasks. */
 
@@ -10428,7 +10425,7 @@ iwx_stop(struct ifnet *ifp)
 
 	iwx_stop_device(sc);
 
-	free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
+	iwx_free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
 	sc->bgscan_unref_arg = NULL;
 	sc->bgscan_unref_arg_size = 0;
 
@@ -10436,7 +10433,7 @@ iwx_stop(struct ifnet *ifp)
 
 	sc->sc_generation++;
 	for (i = 0; i < nitems(sc->sc_cmd_resp_pkt); i++) {
-		free(sc->sc_cmd_resp_pkt[i], M_DEVBUF, sc->sc_cmd_resp_len[i]);
+		iwx_free(sc->sc_cmd_resp_pkt[i], M_DEVBUF, sc->sc_cmd_resp_len[i]);
 		sc->sc_cmd_resp_pkt[i] = NULL;
 		sc->sc_cmd_resp_len[i] = 0;
 	}
@@ -11157,7 +11154,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
 			if ((pkt->hdr.flags & IWX_CMD_FAILED_MSK) ||
 			    pkt_len < sizeof(*pkt) ||
 			    pkt_len > sc->sc_cmd_resp_len[idx]) {
-				free(sc->sc_cmd_resp_pkt[idx], M_DEVBUF,
+				iwx_free(sc->sc_cmd_resp_pkt[idx], M_DEVBUF,
 				    sc->sc_cmd_resp_len[idx]);
 				sc->sc_cmd_resp_pkt[idx] = NULL;
 				break;
@@ -12325,7 +12322,7 @@ iwx_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_pcitag = pa->pa_tag;
 	sc->sc_dmat = pa->pa_dmat;
 
-	rw_init(&sc->ioctl_rwl, "iwxioctl");
+	rw_init(&sc->ioctl_rwl);
 
 	err = pci_get_capability(sc->sc_pct, sc->sc_pcitag,
 	    PCI_CAP_PCIEXPRESS, &sc->sc_cap_off, NULL);
@@ -12783,7 +12780,7 @@ iwx_init_task(void *arg1)
 	int generation = sc->sc_generation;
 	int fatal = (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_RFKILL));
 
-	rw_enter_write(&sc->ioctl_rwl);
+	rw_enter(&sc->ioctl_rwl, RW_WRITER);
 	if (generation != sc->sc_generation) {
 		rw_exit(&sc->ioctl_rwl);
 		splx(s);
@@ -12834,7 +12831,7 @@ iwx_wakeup(struct iwx_softc *sc)
 	struct ifnet *ifp = &sc->sc_ic.ic_if;
 	int err;
 
-	rw_enter_write(&sc->ioctl_rwl);
+	rw_enter(&sc->ioctl_rwl, RW_WRITER);
 
 	err = iwx_start_hw(sc);
 	if (err) {
@@ -12872,7 +12869,7 @@ iwx_activate(struct device *self, int act)
 	switch (act) {
 	case DVACT_QUIESCE:
 		if (ifp->if_flags & IFF_RUNNING) {
-			rw_enter_write(&sc->ioctl_rwl);
+			rw_enter(&sc->ioctl_rwl, RW_WRITER);
 			iwx_stop(ifp);
 			rw_exit(&sc->ioctl_rwl);
 		}

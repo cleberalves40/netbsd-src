@@ -757,7 +757,7 @@ struct iwx_softc {
 
 	int sc_generation;
 
-	struct rwlock ioctl_rwl;
+	krwlock_t ioctl_rwl;
 
 	int sc_cap_off; /* PCIe caps */
 
