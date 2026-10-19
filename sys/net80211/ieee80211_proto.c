@@ -1188,6 +1188,25 @@ ieee80211_ba_arm(struct ieee80211com *ic)
 		ic->ic_ifp->if_timer = 1;
 }
 
+/*
+ * Start a block ack agreement for a TID if none is in progress.  Called
+ * from the transmit path for each QoS data frame.  Requests are paced by
+ * ni_addba_wait, which ieee80211_ba_node_tick() counts down; the wait
+ * starts at ni_addba_req_intval (at least one second), so a refused or
+ * unanswered request is retried with backoff rather than on every frame.
+ */
+void
+ieee80211_ampdu_trigger(struct ieee80211com *ic, struct ieee80211_node *ni,
+    int tid, u_int16_t ssn)
+{
+	if (ni->ni_tx_ba[tid].ba_state != IEEE80211_BA_INIT ||
+	    ni->ni_addba_wait[tid] > 0)
+		return;
+	ni->ni_addba_wait[tid] = MAX(ni->ni_addba_req_intval[tid], 1);
+	ieee80211_ba_arm(ic);
+	(void)ieee80211_addba_request(ic, ni, ssn, tid);
+}
+
 /* Request initiation of a block ack agreement with the peer. */
 int
 ieee80211_addba_request(struct ieee80211com *ic, struct ieee80211_node *ni,
@@ -1329,6 +1348,11 @@ ieee80211_ba_node_tick(struct ieee80211com *ic, struct ieee80211_node *ni,
 	for (tid = 0; tid < IEEE80211_NUM_TID; tid++) {
 		struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
 		struct ieee80211_rx_ba *rba;
+
+		if (ni->ni_addba_wait[tid] > 0) {
+			if (--ni->ni_addba_wait[tid] > 0)
+				*pending = 1;
+		}
 
 		if (ni->ni_addba_req_timer[tid] > 0) {
 			if (--ni->ni_addba_req_timer[tid] == 0) {

@@ -522,6 +522,22 @@ ieee80211_crypto_getmcastkey(struct ieee80211com *ic,
 }
 
 /*
+ * A-MPDU is used only when the peer is HT and the driver offloads block
+ * ack.  net80211 does not yet track the transmit window in software
+ * (that needs Block Ack control frame processing), so software
+ * aggregation stays off.  WPA is required, as in OpenBSD: without
+ * encryption a buggy peer can be made to accept injected A-MPDU subframes.
+ */
+static int
+ieee80211_can_use_ampdu(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+	return (ni->ni_flags & IEEE80211_NODE_HT) &&
+	    (ic->ic_caps & IEEE80211_C_ADDBA_OFFLOAD) &&
+	    !(ic->ic_opmode == IEEE80211_M_STA && ni != ic->ic_bss) &&
+	    (ic->ic_flags & IEEE80211_F_WPA);
+}
+
+/*
  * Encapsulate an outbound data frame.  The mbuf chain is updated.
  * If an error is encountered NULL is returned.  The caller is required
  * to provide a node reference and pullup the ethernet header in the
@@ -659,7 +675,10 @@ ieee80211_encap(struct ieee80211com *ic, struct mbuf *m,
 		ac = M_WME_GETAC(m);
 		/* map from access class/queue to 11e header priorty value */
 		tid = WME_AC_TO_TID(ac);
-		qwh->i_qos[0] = tid & IEEE80211_QOS_TID;
+		if (ieee80211_can_use_ampdu(ic, ni))
+				ieee80211_ampdu_trigger(ic, ni, tid,
+				    ni->ni_txseqs[tid]);
+			qwh->i_qos[0] = tid & IEEE80211_QOS_TID;
 		if (ic->ic_wme.wme_wmeChanParams.cap_wmeParams[ac].wmep_noackPolicy)
 			qwh->i_qos[0] |= 1 << IEEE80211_QOS_ACKPOLICY_S;
 		qwh->i_qos[1] = 0;

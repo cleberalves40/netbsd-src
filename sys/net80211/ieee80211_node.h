@@ -143,6 +143,7 @@ struct ieee80211_node {
 /* NB: this must have the same value as IEEE80211_FC1_PWR_MGT */
 #define	IEEE80211_NODE_PWR_MGT	0x0010		/* power save mode enabled */
 #define	IEEE80211_NODE_AREF	0x0020		/* authentication ref held */
+#define	IEEE80211_NODE_HT	0x0040		/* HT peer: A-MPDU allowed */
 	u_int16_t		ni_associd;	/* assoc response */
 	u_int16_t		ni_txpower;	/* current transmit power */
 	u_int16_t		ni_vlan;	/* vlan tag */
@@ -237,6 +238,7 @@ struct ieee80211_node {
 	/* Block ack: per-TID agreement state */
 	int			ni_addba_req_intval[IEEE80211_NUM_TID];
 	int			ni_addba_req_timer[IEEE80211_NUM_TID];
+	int			ni_addba_wait[IEEE80211_NUM_TID];	/* seconds before a new ADDBA request */
 	struct ieee80211_tx_ba	ni_tx_ba[IEEE80211_NUM_TID];
 	struct ieee80211_rx_ba	ni_rx_ba[IEEE80211_NUM_TID];
 	u_int			ni_ba_gen;	/* block ack walk generation */
