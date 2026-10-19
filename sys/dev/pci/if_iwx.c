@@ -786,7 +786,7 @@ iwx_alloc_fw_monitor_block(struct iwx_softc *sc, uint8_t max_power,
 	struct iwx_dma_info *fw_mon = &sc->fw_mon;
 	uint32_t size = 0;
 	uint8_t power;
-	int err;
+	int err = ENOMEM;	/* stays this if no size fits */
 
 	if (fw_mon->size)
 		return 0;
