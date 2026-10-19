@@ -126,7 +126,7 @@
 
 #define DEVNAME(_s)	((_s)->sc_dev.dv_xname)
 
-#define IC2IFP(_ic_) (&(_ic_)->ic_if)
+#define IC2IFP(_ic_) ((_ic_)->ic_ifp)
 
 #define le16dec(_a_) (le16toh(*(const uint16_t *)(_a_)))
 #define le32_to_cpup(_a_) (le32toh(*(const uint32_t *)(_a_)))
@@ -1222,7 +1222,7 @@ iwx_read_firmware(struct iwx_softc *sc)
 		goto out;
 	}
 
-	if (ic->ic_if.if_flags & IFF_DEBUG)
+	if (ic->ic_ifp->if_flags & IFF_DEBUG)
 		printf("%s: using firmware %s\n", DEVNAME(sc), sc->sc_fwname);
 
 	sc->sc_capaflags = 0;
@@ -5554,7 +5554,7 @@ iwx_rx_bmiss(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 
 	missed = le32toh(mbn->consec_missed_beacons_since_last_rx);
 	if (missed > ic->ic_bmissthres && ic->ic_mgt_timer == 0) {
-		if (ic->ic_if.if_flags & IFF_DEBUG)
+		if (ic->ic_ifp->if_flags & IFF_DEBUG)
 			printf("%s: receiving no beacons from %s; checking if "
 			    "this AP is still responding to probe requests\n",
 			    DEVNAME(sc), ether_sprintf(ic->ic_bss->ni_macaddr));
@@ -6457,7 +6457,7 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		sc->qfullmsk |= 1 << ring->qid;
 	}
 
-	if (ic->ic_if.if_flags & IFF_UP)
+	if (ic->ic_ifp->if_flags & IFF_UP)
 		sc->sc_tx_timer[ring->qid] = 15;
 
 	return 0;
@@ -9782,7 +9782,7 @@ iwx_endscan(struct iwx_softc *sc)
 		return;
 
 	sc->sc_flags &= ~(IWX_FLAG_SCANNING | IWX_FLAG_BGSCAN);
-	ieee80211_end_scan(&ic->ic_if);
+	ieee80211_end_scan(ic->ic_ifp);
 }
 
 /*
@@ -11216,7 +11216,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
 
 		case IWX_PSM_UAPSD_AP_MISBEHAVING_NOTIFICATION: {
 			struct ieee80211com *ic = &sc->sc_ic;
-			struct ifnet *ifp = &ic->ic_if;
+			struct ifnet *ifp = ic->ic_ifp;
 			struct ieee80211_node *ni = ic->ic_bss;
 			struct iwx_uapsd_misbehaving_ap_notif *notif;
 
@@ -11423,7 +11423,7 @@ iwx_notif_intr(struct iwx_softc *sc)
 		iwx_rx_pkt(sc, data, &ml);
 		sc->rxq.cur = (sc->rxq.cur + 1) % IWX_RX_MQ_RING_COUNT;
 	}
-	if_input(&sc->sc_ic.ic_if, &ml);
+	if_input(sc->sc_ic.ic_ifp, &ml);
 
 	/*
 	 * Tell the firmware what we have processed.
@@ -12310,7 +12310,7 @@ iwx_attach(struct device *parent, struct device *self, void *aux)
 	pci_intr_handle_t ih;
 	pcireg_t reg, memtype;
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = &ic->ic_if;
+	struct ifnet *ifp = ic->ic_ifp;
 	const char *intrstr;
 	const struct iwx_device_cfg *cfg;
 	int err;
@@ -12758,7 +12758,7 @@ fail1:	iwx_dma_contig_free(&sc->ctxt_info_dma);
 void
 iwx_radiotap_attach(struct iwx_softc *sc)
 {
-	bpfattach(&sc->sc_drvbpf, &sc->sc_ic.ic_if, DLT_IEEE802_11_RADIO,
+	bpfattach(&sc->sc_drvbpf, sc->sc_ic.ic_ifp, DLT_IEEE802_11_RADIO,
 	    sizeof (struct ieee80211_frame) + IEEE80211_RADIOTAP_HDRLEN);
 
 	sc->sc_rxtap_len = sizeof sc->sc_rxtapu;
@@ -12775,7 +12775,7 @@ void
 iwx_init_task(void *arg1)
 {
 	struct iwx_softc *sc = arg1;
-	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	struct ifnet *ifp = sc->sc_ic.ic_ifp;
 	int s = splnet();
 	int generation = sc->sc_generation;
 	int fatal = (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_RFKILL));
@@ -12828,7 +12828,7 @@ int
 iwx_wakeup(struct iwx_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	struct ifnet *ifp = sc->sc_ic.ic_ifp;
 	int err;
 
 	rw_enter(&sc->ioctl_rwl, RW_WRITER);
@@ -12863,7 +12863,7 @@ int
 iwx_activate(struct device *self, int act)
 {
 	struct iwx_softc *sc = (struct iwx_softc *)self;
-	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	struct ifnet *ifp = sc->sc_ic.ic_ifp;
 	int err = 0;
 
 	switch (act) {
