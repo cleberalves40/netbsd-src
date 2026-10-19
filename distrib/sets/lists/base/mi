@@ -249,6 +249,29 @@
 ./libdata/firmware/if_iwn/iwlwifi-6000g2a-6.ucode	base-firmware-root	firmware
 ./libdata/firmware/if_iwn/iwlwifi-6000g2b-6.ucode	base-firmware-root	firmware
 ./libdata/firmware/if_iwn/iwlwifi-6050-5.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx	base-firmware-root
+./libdata/firmware/if_iwx/iwx-Qu-b0-hr-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-Qu-b0-jf-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-Qu-c0-hr-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-Qu-c0-jf-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-QuZ-a0-hr-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-QuZ-a0-jf-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-bz-b0-gf-a0-100.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-bz-b0-gf-a0.pnvm	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-cc-a0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-ma-b0-gf-a0-89.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-ma-b0-gf-a0.pnvm	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-ma-b0-gf4-a0-89.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-ma-b0-gf4-a0.pnvm	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-ma-b0-hr-b0-89.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-so-a0-gf-a0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-so-a0-gf-a0.pnvm	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-so-a0-gf4-a0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-so-a0-gf4-a0.pnvm	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-so-a0-hr-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-so-a0-jf-b0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-ty-a0-gf-a0-77.ucode	base-firmware-root	firmware
+./libdata/firmware/if_iwx/iwx-ty-a0-gf-a0.pnvm	base-firmware-root	firmware
 ./libdata/firmware/if_otus			base-firmware-root
 ./libdata/firmware/if_otus/otus-init		base-firmware-root	firmware
 ./libdata/firmware/if_otus/otus-license		base-firmware-root	firmware
