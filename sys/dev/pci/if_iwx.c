@@ -105,6 +105,7 @@
 
 #include <sys/bus.h>
 #include <sys/intr.h>
+#include <sys/pmf.h>
 
 #include "if_iwx_compat.h"
 
@@ -363,11 +364,6 @@ void	iwx_setup_vht_rates(struct iwx_softc *);
 int	iwx_mimo_enabled(struct iwx_softc *);
 void	iwx_mac_ctxt_task(void *);
 void	iwx_phy_ctxt_task(void *);
-void	iwx_updatechan(struct ieee80211com *);
-void	iwx_updateprot(struct ieee80211com *);
-void	iwx_updateslot(struct ieee80211com *);
-void	iwx_updateedca(struct ieee80211com *);
-void	iwx_updatedtim(struct ieee80211com *);
 void	iwx_init_reorder_buffer(struct iwx_reorder_buffer *, uint16_t,
 	    uint16_t);
 void	iwx_clear_reorder_buffer(struct iwx_softc *, struct iwx_rxba_data *);
@@ -551,6 +547,8 @@ void	iwx_init_task(void *);
 int	iwx_activate(device_t, enum devact);
 void	iwx_resume(struct iwx_softc *);
 int	iwx_wakeup(struct iwx_softc *);
+static bool	iwx_pmf_suspend(device_t, const pmf_qual_t *);
+static bool	iwx_pmf_resume(device_t, const pmf_qual_t *);
 
 #if NBPFILTER > 0
 void	iwx_radiotap_attach(struct iwx_softc *);
@@ -3764,56 +3762,6 @@ iwx_phy_ctxt_task(void *arg)
 
 	refcnt_rele_wake(&sc->task_refs);
 	splx(s);
-}
-
-void
-iwx_updatechan(struct ieee80211com *ic)
-{
-	struct iwx_softc *sc = IC2SC(ic);
-
-	if (ic->ic_state == IEEE80211_S_RUN &&
-	    !task_pending(&sc->newstate_task))
-		iwx_add_task(sc, systq, &sc->phy_ctxt_task);
-}
-
-void
-iwx_updateprot(struct ieee80211com *ic)
-{
-	struct iwx_softc *sc = IC2SC(ic);
-
-	if (ic->ic_state == IEEE80211_S_RUN &&
-	    !task_pending(&sc->newstate_task))
-		iwx_add_task(sc, systq, &sc->mac_ctxt_task);
-}
-
-void
-iwx_updateslot(struct ieee80211com *ic)
-{
-	struct iwx_softc *sc = IC2SC(ic);
-
-	if (ic->ic_state == IEEE80211_S_RUN &&
-	    !task_pending(&sc->newstate_task))
-		iwx_add_task(sc, systq, &sc->mac_ctxt_task);
-}
-
-void
-iwx_updateedca(struct ieee80211com *ic)
-{
-	struct iwx_softc *sc = IC2SC(ic);
-
-	if (ic->ic_state == IEEE80211_S_RUN &&
-	    !task_pending(&sc->newstate_task))
-		iwx_add_task(sc, systq, &sc->mac_ctxt_task);
-}
-
-void
-iwx_updatedtim(struct ieee80211com *ic)
-{
-	struct iwx_softc *sc = IC2SC(ic);
-
-	if (ic->ic_state == IEEE80211_S_RUN &&
-	    !task_pending(&sc->newstate_task))
-		iwx_add_task(sc, systq, &sc->mac_ctxt_task);
 }
 
 void
@@ -11471,6 +11419,8 @@ iwx_preinit(struct iwx_softc *sc)
 #if NBPFILTER > 0
 	iwx_radiotap_attach(sc);
 #endif
+	if (!pmf_device_register(sc->sc_dev, iwx_pmf_suspend, iwx_pmf_resume))
+		aprint_error_dev(sc->sc_dev, "couldn't establish power handler\n");
 	return 0;
 }
 
@@ -12131,6 +12081,41 @@ iwx_wakeup(struct iwx_softc *sc)
 	return 0;
 }
 
+static bool
+iwx_pmf_suspend(device_t self, const pmf_qual_t *qual)
+{
+	struct iwx_softc *sc = device_private(self);
+	struct ifnet *ifp = IC2IFP(&sc->sc_ic);
+
+	if (ifp->if_flags & IFF_RUNNING) {
+		rw_enter(&sc->ioctl_rwl, RW_WRITER);
+		iwx_stop(ifp);
+		rw_exit(&sc->ioctl_rwl);
+	}
+	return true;
+}
+
+static bool
+iwx_pmf_resume(device_t self, const pmf_qual_t *qual)
+{
+	struct iwx_softc *sc = device_private(self);
+	struct ifnet *ifp = IC2IFP(&sc->sc_ic);
+	pcireg_t reg;
+	int err;
+
+	/* Clear the device's PCI retry timeout register (0x40). */
+	reg = pci_conf_read(sc->sc_pct, sc->sc_pcitag, 0x40);
+	pci_conf_write(sc->sc_pct, sc->sc_pcitag, 0x40, reg & ~0xff00);
+
+	if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP) {
+		err = iwx_wakeup(sc);
+		if (err)
+			printf("%s: could not initialize hardware\n",
+			    DEVNAME(sc));
+	}
+	return true;
+}
+
 int
 iwx_activate(device_t self, enum devact act)
 {
@@ -12139,8 +12124,11 @@ iwx_activate(device_t self, enum devact act)
 
 	switch (act) {
 	case DVACT_DEACTIVATE:
-		if (ifp->if_flags & IFF_RUNNING)
+		if (ifp->if_flags & IFF_RUNNING) {
+			rw_enter(&sc->ioctl_rwl, RW_WRITER);
 			iwx_stop(ifp);
+			rw_exit(&sc->ioctl_rwl);
+		}
 		return 0;
 	default:
 		return EOPNOTSUPP;
