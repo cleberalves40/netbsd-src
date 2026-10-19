@@ -56,6 +56,7 @@
 
 #include <net80211/_ieee80211.h>
 #include <net80211/ieee80211.h>
+#include <net80211/ieee80211_ht.h>	/* HT/VHT/HE constants */
 #include <net80211/ieee80211_crypto.h>
 #include <net80211/ieee80211_ioctl.h>		/* for ieee80211_stats */
 #include <net80211/ieee80211_node.h>
@@ -210,6 +211,51 @@ struct ieee80211com {
 	 */
 	const struct ieee80211_aclator *ic_acl;
 	void			*ic_as;
+
+	/*
+	 * HT (802.11n) capabilities.  Appended to the end of the
+	 * structure so that existing fields keep their offsets.
+	 */
+	u_int32_t		ic_txbfcaps;
+	u_int16_t		ic_htcaps;
+	u_int8_t		ic_ampdu_params;
+	u_int8_t		ic_sup_mcs[howmany(80, NBBY)];
+	u_int16_t		ic_max_rxrate;	/* in Mb/s, 0 <= rate <= 1023 */
+	u_int8_t		ic_tx_mcs_set;
+	u_int16_t		ic_htxcaps;
+	u_int8_t		ic_aselcaps;
+	u_int8_t		ic_dialog_token;
+	int			ic_fixed_mcs;
+
+	/* VHT (802.11ac) capabilities */
+	uint32_t		ic_vhtcaps;
+	uint16_t		ic_vht_rxmcs;
+	uint16_t		ic_vht_rx_max_lgi_mbit_s;
+	uint16_t		ic_vht_txmcs;
+	uint16_t		ic_vht_tx_max_lgi_mbit_s;
+
+	/* HE (802.11ax) capabilities */
+	u_int8_t		ic_he_mac_cap[IEEE80211_HE_MAC_CAPS_LEN];
+	u_int8_t		ic_he_phy_cap[IEEE80211_HE_PHY_CAPS_LEN];
+	uint16_t		ic_he_rxmcs_80;
+	uint16_t		ic_he_txmcs_80;
+	uint16_t		ic_he_rxmcs_160;
+	uint16_t		ic_he_txmcs_160;
+	uint16_t		ic_he_rxmcs_80p80;
+	uint16_t		ic_he_txmcs_80p80;
+
+	/*
+	 * A-MPDU (block ack) hooks.  Drivers without A-MPDU support
+	 * leave these NULL; the stack then keeps its current behaviour.
+	 */
+	int			(*ic_ampdu_tx_start)(struct ieee80211com *,
+			    struct ieee80211_node *, u_int8_t);
+	void			(*ic_ampdu_tx_stop)(struct ieee80211com *,
+			    struct ieee80211_node *, u_int8_t);
+	int			(*ic_ampdu_rx_start)(struct ieee80211com *,
+			    struct ieee80211_node *, u_int8_t);
+	void			(*ic_ampdu_rx_stop)(struct ieee80211com *,
+			    struct ieee80211_node *, u_int8_t);
 };
 
 LIST_HEAD(ieee80211com_head, ieee80211com);

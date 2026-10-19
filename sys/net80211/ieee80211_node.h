@@ -38,6 +38,7 @@
 #include <sys/atomic.h>
 #include <net80211/ieee80211_netbsd.h>
 #include <net80211/ieee80211_ioctl.h>		/* for ieee80211_nodestats */
+#include <net80211/ieee80211_ht.h>		/* HT/VHT/HE constants */
 
 #ifdef _KERNEL
 /*
@@ -151,6 +152,55 @@ struct ieee80211_node {
 	int			ni_txrate;	/* index to ni_rates[] */
 	struct	ifqueue		ni_savedq;	/* ps-poll queue */
 	struct ieee80211_nodestats ni_stats;	/* per-node statistics */
+
+	/* HT (802.11n) capabilities, appended to keep existing offsets */
+	uint16_t		ni_htcaps;
+	uint8_t			ni_ampdu_param;
+	uint8_t			ni_rxmcs[howmany(80,NBBY)];
+	uint16_t		ni_max_rxrate;	/* in Mb/s, 0 <= rate <= 1023 */
+	uint8_t			ni_tx_mcs_set;
+	uint16_t		ni_htxcaps;
+	uint32_t		ni_txbfcaps;
+	uint8_t			ni_aselcaps;
+
+	/* HT operation */
+	uint8_t			ni_primary_chan;
+	uint8_t			ni_htop0;
+	uint16_t		ni_htop1;
+	uint16_t		ni_htop2;
+	uint8_t			ni_basic_mcs[howmany(128,NBBY)];
+
+	/* VHT (802.11ac) capabilities */
+	uint32_t		ni_vhtcaps;
+	uint16_t		ni_vht_rxmcs;
+	uint16_t		ni_vht_rx_max_lgi_mbit_s;
+	uint16_t		ni_vht_txmcs;
+	uint16_t		ni_vht_tx_max_lgi_mbit_s;
+
+	/* VHT operation */
+	uint8_t			ni_vht_chan_width;
+	uint8_t			ni_vht_chan_center_freq_idx0;
+	uint8_t			ni_vht_chan_center_freq_idx1;
+	uint16_t		ni_vht_basic_mcs;
+
+	/* HE (802.11ax) capabilities */
+	uint8_t			ni_he_mac_cap[IEEE80211_HE_MAC_CAPS_LEN];
+	uint8_t			ni_he_phy_cap[IEEE80211_HE_PHY_CAPS_LEN];
+	uint16_t		ni_he_rxmcs_80;
+	uint16_t		ni_he_txmcs_80;
+	uint16_t		ni_he_rxmcs_160;
+	uint16_t		ni_he_txmcs_160;
+	uint16_t		ni_he_rxmcs_80p80;
+	uint16_t		ni_he_txmcs_80p80;
+
+	/* HE operation */
+	uint8_t			ni_he_oper_params[IEEE80211_HEOP_PARAMS_LEN];
+	uint16_t		ni_he_basic_mcs;
+
+	/* spatial stream counts used by rate control */
+	int			ni_txmcs;	/* current MCS used for TX */
+	int			ni_vht_ss;	/* VHT # spatial streams */
+	int			ni_he_ss;	/* HE # spatial streams */
 };
 MALLOC_DECLARE(M_80211_NODE);
 
