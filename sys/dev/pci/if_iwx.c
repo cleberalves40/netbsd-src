@@ -115,12 +115,68 @@
 #include <net/bpf.h>
 #include <net/if.h>
 #include <net/if_media.h>
+#include <net/if_dl.h>
 
 #include <netinet/in.h>
 #include <net/if_ether.h>
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_radiotap.h>
+
+/*
+ * net80211 in NetBSD provides these as flags or fields rather than as
+ * the helper functions used by OpenBSD.  Map them here.
+ */
+#define IEEE80211_FC0_SUBTYPE_BAR	0x80
+#define IEEE80211_CCMP_HDRLEN		8
+#define IEEE80211_CHAN_40MHZ		IEEE80211_CHAN_HT40
+#define IEEE80211_CHAN_40MHZ_ALLOWED(c)	(((c)->ic_flags & IEEE80211_CHAN_HT40) != 0)
+#define IEEE80211_CHAN_80MHZ_ALLOWED(c)	(((c)->ic_flags & IEEE80211_CHAN_VHT80) != 0)
+#define IEEE80211_CHAN_160MHZ_ALLOWED(c) \
+	(((c)->ic_flags & IEEE80211_CHAN_VHT160) != 0)
+#define ieee80211_node_supports_ht_chan40(ni) \
+	(((ni)->ni_htcaps & IEEE80211_HTCAP_CBW20_40) != 0)
+#define ieee80211_node_supports_vht_chan80(ni) \
+	(((ni)->ni_flags & IEEE80211_NODE_VHT) != 0)
+#define ieee80211_node_supports_vht_chan160(ni) \
+	(((((ni)->ni_vhtcaps & IEEE80211_VHTCAP_CHAN_WIDTH_MASK) >> \
+	    IEEE80211_VHTCAP_CHAN_WIDTH_SHIFT) == IEEE80211_VHTCAP_CHAN_WIDTH_160) || \
+	 ((((ni)->ni_vhtcaps & IEEE80211_VHTCAP_CHAN_WIDTH_MASK) >> \
+	    IEEE80211_VHTCAP_CHAN_WIDTH_SHIFT) == IEEE80211_VHTCAP_CHAN_WIDTH_160_8080))
+#define ieee80211_node_ht_secondary_channel_offset(ni) \
+	((ni)->ni_htop0 & IEEE80211_HTOP0_SCO_MASK)
+#define ieee80211_node_vht_channel_width(ni) ((ni)->ni_vht_chan_width)
+#define ieee80211_get_hdrlen(wh)	ieee80211_anyhdrsize(wh)
+#define ieee80211_node_supports_ht_sgi20(ni) \
+	(((ni)->ni_htcaps & IEEE80211_HTCAP_SGI20) != 0)
+#define ieee80211_node_supports_ht_sgi40(ni) \
+	(((ni)->ni_htcaps & IEEE80211_HTCAP_SGI40) != 0)
+#define ieee80211_node_supports_vht_sgi80(ni) \
+	(((ni)->ni_vhtcaps & IEEE80211_VHTCAP_SGI80) != 0)
+#define ieee80211_node_supports_vht_sgi160(ni) \
+	(((ni)->ni_vhtcaps & IEEE80211_VHTCAP_SGI160) != 0)
+#define IEEE80211_VHTOP0_CHAN_WIDTH_HT	0
+#define IEEE80211_VHTOP0_CHAN_WIDTH_160	2
+
+/* Beacons missed in a row before the firmware reports the AP as gone. */
+#define IWX_BMISS_THRES		7
+
+/* Lowest basic rate of the BSS, in 500 kb/s units. */
+static uint8_t
+ieee80211_min_basic_rate(struct ieee80211com *ic)
+{
+	const struct ieee80211_rateset *rs = &ic->ic_bss->ni_rates;
+	uint8_t min = 0;
+	int i;
+
+	for (i = 0; i < rs->rs_nrates; i++) {
+		if ((rs->rs_rates[i] & IEEE80211_RATE_BASIC) == 0)
+			continue;
+		if (min == 0 || (rs->rs_rates[i] & IEEE80211_RATE_VAL) < min)
+			min = rs->rs_rates[i] & IEEE80211_RATE_VAL;
+	}
+	return min ? min : 2;
+}
 
 #define DEVNAME(_s)	device_xname((_s)->sc_dev)
 
@@ -431,16 +487,12 @@ void	iwx_add_task(struct iwx_softc *, struct taskq *, struct task *);
 void	iwx_del_task(struct iwx_softc *, struct taskq *, struct task *);
 int	iwx_initiate_scan(struct iwx_softc *, int);
 int	iwx_scan(struct iwx_softc *);
-int	iwx_bgscan(struct ieee80211com *);
-void	iwx_bgscan_done(struct ieee80211com *,
-	    struct ieee80211_node_switch_bss_arg *, size_t);
-void	iwx_bgscan_done_task(void *);
 int	iwx_umac_scan_abort(struct iwx_softc *);
 int	iwx_scan_abort(struct iwx_softc *);
 int	iwx_enable_mgmt_queue(struct iwx_softc *);
 int	iwx_disable_mgmt_queue(struct iwx_softc *);
 int	iwx_rs_rval2idx(uint8_t);
-uint16_t iwx_rs_ht_rates(struct iwx_softc *, struct ieee80211_node *, int);
+uint16_t iwx_rs_ht_rates(struct iwx_softc *, struct ieee80211_node *, int, int);
 uint16_t iwx_rs_vht_rates(struct iwx_softc *, struct ieee80211_node *, int);
 int	iwx_rs_init_v3(struct iwx_softc *, struct iwx_node *);
 int	iwx_rs_init_v4(struct iwx_softc *, struct iwx_node *);
@@ -454,7 +506,7 @@ int	iwx_auth(struct iwx_softc *);
 int	iwx_deauth(struct iwx_softc *);
 int	iwx_run(struct iwx_softc *);
 int	iwx_run_stop(struct iwx_softc *);
-struct ieee80211_node *iwx_node_alloc(struct ieee80211com *);
+struct ieee80211_node *iwx_node_alloc(struct ieee80211_node_table *);
 int	iwx_media_change(struct ifnet *);
 void	iwx_newstate_task(void *);
 int	iwx_newstate(struct ieee80211com *, enum ieee80211_state, int);
@@ -3218,8 +3270,8 @@ iwx_init_channel_map(struct iwx_softc *sc, uint16_t *channel_profile_v3,
 			    IEEE80211_CHAN_A;
 		}
 		channel->ic_freq = ieee80211_ieee2mhz(hw_value, flags);
-		channel->ic_xflags &= ~(IEEE80211_CHANX_80MHZ |
-		    IEEE80211_CHANX_160MHZ);
+		channel->ic_flags &= ~(IEEE80211_CHAN_VHT80 |
+		    IEEE80211_CHAN_VHT160);
 
 		if (!(ch_flags & IWX_NVM_CHANNEL_ACTIVE))
 			channel->ic_flags |= IEEE80211_CHAN_PASSIVE;
@@ -3227,15 +3279,15 @@ iwx_init_channel_map(struct iwx_softc *sc, uint16_t *channel_profile_v3,
 		if (data->sku_cap_11n_enable) {
 			channel->ic_flags |= IEEE80211_CHAN_HT;
 			if (ch_flags & IWX_NVM_CHANNEL_40MHZ)
-				channel->ic_flags |= IEEE80211_CHAN_40MHZ;
+				channel->ic_flags |= IEEE80211_CHAN_HT40U;
 		}
 
 		if (is_5ghz && data->sku_cap_11ac_enable) {
 			channel->ic_flags |= IEEE80211_CHAN_VHT;
 			if (ch_flags & IWX_NVM_CHANNEL_80MHZ)
-				channel->ic_xflags |= IEEE80211_CHANX_80MHZ;
+				channel->ic_flags |= IEEE80211_CHAN_VHT80;
 			if (ch_flags & IWX_NVM_CHANNEL_160MHZ)
-				channel->ic_xflags |= IEEE80211_CHANX_160MHZ;
+				channel->ic_flags |= IEEE80211_CHAN_VHT160;
 		}
 	}
 }
@@ -3771,7 +3823,6 @@ iwx_sta_tx_agg_start(struct iwx_softc *sc, struct ieee80211_node *ni,
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_tx_ba *ba;
 	int err, qid;
-	struct iwx_tx_ring *ring;
 
 	/* Ensure we can map this TID to an aggregation queue. */
 	if (tid >= IWX_MAX_TID_COUNT)
@@ -3810,11 +3861,10 @@ iwx_sta_tx_agg_start(struct iwx_softc *sc, struct ieee80211_node *ni,
 
 		ba->ba_winstart = 0;
 	} else
-		ba->ba_winstart = ni->ni_qos_txseqs[tid];
+		ba->ba_winstart = ni->ni_txseqs[tid];
 
 	ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
 
-	ring = &sc->txq[qid];
 	ba->ba_timeout_val = 0;
 	ieee80211_addba_resp_accept(ic, ni, tid);
 	sc->aggqid[tid] = qid;
@@ -4659,7 +4709,7 @@ iwx_rx_addbuf(struct iwx_softc *sc, int size, int idx)
 	if (size <= MCLBYTES) {
 		MCLGET(m, M_DONTWAIT);
 	} else {
-		MCLGETL(m, M_DONTWAIT, IWX_RBUF_SIZE);
+		MEXTMALLOC(m, IWX_RBUF_SIZE, M_DONTWAIT);
 	}
 	if ((m->m_flags & M_EXT) == 0) {
 		m_freem(m);
@@ -5129,7 +5179,7 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 		return;
 	}
 
-	m->m_data = pktdata + desc_size;
+	m->m_data = (char *)pktdata + desc_size;
 	m->m_pkthdr.len = m->m_len = len;
 
 	/* Account for padding following the frame header. */
@@ -5177,8 +5227,6 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 	 */
 	if (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) {
 		struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
-		uint8_t subframe_idx = (desc->amsdu_info &
-		    IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK);
 		if (ieee80211_has_qos(wh) && ieee80211_has_addr4(wh) &&
 		    m->m_len >= sizeof(struct ieee80211_qosframe_addr4)) {
 			struct ieee80211_qosframe_addr4 *qwh4 = mtod(m,
@@ -5245,8 +5293,6 @@ iwx_clear_tx_desc(struct iwx_softc *sc, struct iwx_tx_ring *ring, int idx)
 void
 iwx_txd_done(struct iwx_softc *sc, struct iwx_tx_data *txd)
 {
-	struct ieee80211com *ic = &sc->sc_ic;
-
 	bus_dmamap_sync(sc->sc_dmat, txd->map, 0, txd->map->dm_mapsize,
 	    BUS_DMASYNC_POSTWRITE);
 	bus_dmamap_unload(sc->sc_dmat, txd->map);
@@ -5370,7 +5416,6 @@ iwx_rx_compressed_ba(struct iwx_softc *sc, struct iwx_rx_packet *pkt)
 		return;
 
 	ni = ic->ic_bss;
-	in = (void *)ni;
 
 	tfd_cnt = le16toh(ba_res->tfd_cnt);
 	ra_tid_cnt = le16toh(ba_res->ra_tid_cnt);
@@ -5420,7 +5465,7 @@ iwx_rx_bmiss(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 	    sizeof(*mbn), BUS_DMASYNC_POSTREAD);
 
 	missed = le32toh(mbn->consec_missed_beacons_since_last_rx);
-	if (missed > ic->ic_bmissthres && ic->ic_mgt_timer == 0) {
+	if (missed > IWX_BMISS_THRES && ic->ic_mgt_timer == 0) {
 		if (ic->ic_ifp->if_flags & IFF_DEBUG)
 			printf("%s: receiving no beacons from %s; checking if "
 			    "this AP is still responding to probe requests\n",
@@ -5759,7 +5804,14 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
 			err = EINVAL;
 			goto out;
 		}
-		m = MCLGETL(NULL, M_DONTWAIT, totlen);
+		MGETHDR(m, M_DONTWAIT, MT_DATA);
+		if (m != NULL && totlen > MHLEN) {
+			MEXTMALLOC(m, totlen, M_DONTWAIT);
+			if ((m->m_flags & M_EXT) == 0) {
+				m_freem(m);
+				m = NULL;
+			}
+		}
 		if (m == NULL) {
 			printf("%s: could not get fw cmd mbuf (%zd bytes)\n",
 			    DEVNAME(sc), totlen);
@@ -5990,7 +6042,6 @@ iwx_tx_fill_cmd(struct iwx_softc *sc, struct iwx_node *in,
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_node *ni = &in->in_ni;
 	struct ieee80211_rateset *rs = &ni->ni_rates;
-	const struct iwx_rate *rinfo;
 	int type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
 	int min_ridx = iwx_rval2ridx(ieee80211_min_basic_rate(ic));
 	int ridx, rate_flags;
@@ -6012,11 +6063,8 @@ iwx_tx_fill_cmd(struct iwx_softc *sc, struct iwx_node *in,
 			ridx = min_ridx;
 	}
 
-	if ((ic->ic_flags & IEEE80211_F_RSNON) &&
-	    ni->ni_rsn_supp_state == RSNA_SUPP_PTKNEGOTIATING)
-		*flags |= IWX_TX_FLAGS_HIGH_PRI;
 
-	rinfo = &iwx_rates[ridx];
+	const struct iwx_rate *rinfo = &iwx_rates[ridx];
 
 	/*
 	 * Do not fill rate_n_flags if firmware controls the Tx rate.
@@ -6103,7 +6151,6 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	struct iwx_tfh_tfd *desc;
 	struct iwx_device_cmd *cmd;
 	struct ieee80211_frame *wh;
-	const struct iwx_rate *rinfo;
 	uint64_t paddr;
 	u_int hdrlen;
 	bus_dma_segment_t *seg;
@@ -6150,7 +6197,7 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	cmd->hdr.qid = ring->qid;
 	cmd->hdr.idx = ring->cur;
 
-	rinfo = iwx_tx_fill_cmd(sc, in, wh, &flags, &rate_n_flags);
+	iwx_tx_fill_cmd(sc, in, wh, &flags, &rate_n_flags);
 
 #if NBPFILTER > 0
 	if (sc->sc_drvbpf != NULL) {
@@ -6901,8 +6948,6 @@ iwx_mld_add_sta_cmd(struct iwx_softc *sc, struct iwx_node *in, int update)
 		sta_cmd.tx_ampdu_max_size = htole32(aggsize);
 	}
 
-	if (in->in_ni.ni_flags & IEEE80211_NODE_MFP)
-		sta_cmd.mfp = htole32(1);
 
 	return iwx_send_cmd_pdu(sc,
 	    IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_STA_CONFIG_CMD),
@@ -7205,7 +7250,7 @@ iwx_fill_probe_req(struct iwx_softc *sc, struct iwx_scan_probe_req *preq)
 			frm = ieee80211_add_xrates(frm, rs);
 		preq->band_data[1].len = htole16(frm - pos);
 		remain -= frm - pos;
-		if (ic->ic_flags & IEEE80211_F_VHTON) {
+		if (ic->ic_vhtcaps != 0) {
 			if (remain < 14)
 				return ENOBUFS;
 			frm = ieee80211_add_vhtcaps(frm, ic);
@@ -7217,7 +7262,7 @@ iwx_fill_probe_req(struct iwx_softc *sc, struct iwx_scan_probe_req *preq)
 	/* Send 11n IEs on both 2GHz and 5GHz bands. */
 	preq->common_data.offset = htole16(frm - (uint8_t *)wh);
 	pos = frm;
-	if (ic->ic_flags & IEEE80211_F_HTON) {
+	if (ic->ic_htcaps != 0) {
 		if (remain < 28)
 			return ENOBUFS;
 		frm = ieee80211_add_htcaps(frm, ic);
@@ -7809,8 +7854,7 @@ iwx_mac_ctxt_cmd_fill_sta(struct iwx_softc *sc, struct iwx_node *in,
 	uint64_t tsf;
 
 	dtim_off = ni->ni_dtim_count * ni->ni_intval * IEEE80211_DUR_TU;
-	memcpy(&tsf, ni->ni_tstamp, sizeof(tsf));
-	tsf = letoh64(tsf);
+	tsf = letoh64(ni->ni_tstamp.tsf);
 
 	sta->is_assoc = htole32(assoc);
 	if (assoc) {
@@ -8079,122 +8123,11 @@ iwx_scan(struct iwx_softc *sc)
 		printf("%s: %s -> %s\n", ifp->if_xname,
 		    ieee80211_state_name[ic->ic_state],
 		    ieee80211_state_name[IEEE80211_S_SCAN]);
-	if ((sc->sc_flags & IWX_FLAG_BGSCAN) == 0) {
-		ieee80211_set_link_state(ic, LINK_STATE_DOWN);
-		ieee80211_node_cleanup(ic, ic->ic_bss);
-	}
+	if_link_state_change(ifp, LINK_STATE_DOWN);
 	ic->ic_state = IEEE80211_S_SCAN;
 	wakeup(&ic->ic_state); /* wake iwx_init() */
 
 	return 0;
-}
-
-int
-iwx_bgscan(struct ieee80211com *ic)
-{
-	struct iwx_softc *sc = IC2IFP(ic)->if_softc;
-	int err;
-
-	if (sc->sc_flags & IWX_FLAG_SCANNING)
-		return 0;
-
-	err = iwx_initiate_scan(sc, 1);
-	if (err) {
-		printf("%s: could not initiate scan\n", DEVNAME(sc));
-		return err;
-	}
-
-	sc->sc_flags |= IWX_FLAG_BGSCAN;
-	return 0;
-}
-
-void
-iwx_bgscan_done(struct ieee80211com *ic,
-    struct ieee80211_node_switch_bss_arg *arg, size_t arg_size)
-{
-	struct iwx_softc *sc = IC2SC(ic);
-
-	iwx_free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
-	sc->bgscan_unref_arg = arg;
-	sc->bgscan_unref_arg_size = arg_size;
-	iwx_add_task(sc, systq, &sc->bgscan_done_task);
-}
-
-void
-iwx_bgscan_done_task(void *arg)
-{
-	struct iwx_softc *sc = arg;
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct iwx_node *in = (void *)ic->ic_bss;
-	struct ieee80211_node *ni = &in->in_ni;
-	int tid, err = 0, s = splnet();
-
-	if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) ||
-	    (ic->ic_flags & IEEE80211_F_BGSCAN) == 0 ||
-	    ic->ic_state != IEEE80211_S_RUN) {
-		err = ENXIO;
-		goto done;
-	}
-
-	err = iwx_flush_sta(sc, in);
-	if (err)
-		goto done;
-
-	for (tid = 0; tid < IWX_MAX_TID_COUNT; tid++) {
-		int qid = IWX_FIRST_AGG_TX_QUEUE + tid;
-
-		if (sc->aggqid[tid] == 0)
-			continue;
-
-		err = iwx_disable_txq(sc, IWX_STATION_ID, qid, tid);
-		if (err)
-			goto done;
-#if 0 /* disabled for now; we are going to DEAUTH soon anyway */
-		IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_BA,
-		    IEEE80211_ACTION_DELBA,
-		    IEEE80211_REASON_AUTH_LEAVE << 16 |
-		    IEEE80211_FC1_DIR_TODS << 8 | tid);
-#endif
-		ieee80211_node_tx_ba_clear(ni, tid);
-		sc->aggqid[tid] = 0;
-	}
-
-	/*
-	 * Remove installed crypto keys while we still have access to them.
-	 * Once iwx_newstate() is entered ic_bss will already contain
-	 * information about our next AP.
-	 */
-	if (ic->ic_flags & IEEE80211_F_RSNON) {
-		ni->ni_port_valid = 0;
-		ni->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
-		ni->ni_flags &= ~IEEE80211_NODE_TXMGMTPROT;
-		ni->ni_flags &= ~IEEE80211_NODE_RXMGMTPROT;
-		ni->ni_rsn_supp_state = RSNA_SUPP_INITIALIZE;
-	}
-
-	/*
-	 * Tx queues have been flushed and Tx agg has been stopped.
-	 * Allow roaming to proceed.
-	 */
-	ni->ni_unref_arg = sc->bgscan_unref_arg;
-	ni->ni_unref_arg_size = sc->bgscan_unref_arg_size;
-	sc->bgscan_unref_arg = NULL;
-	sc->bgscan_unref_arg_size = 0;
-	if (ni->ni_flags & IEEE80211_NODE_MFP) {
-		/* Deauth frame already sent. */
-		ieee80211_node_switch_bss(ic, &in->in_ni);
-	} else
-		ieee80211_node_tx_stopped(ic, &in->in_ni);
-done:
-	if (err) {
-		iwx_free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
-		sc->bgscan_unref_arg = NULL;
-		sc->bgscan_unref_arg_size = 0;
-		if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
-			task_add(systq, &sc->init_task);
-	}
-	refcnt_rele_wake(&sc->task_refs);
-	splx(s);
 }
 
 int
@@ -8280,19 +8213,18 @@ iwx_rs_rval2idx(uint8_t rval)
 }
 
 uint16_t
-iwx_rs_ht_rates(struct iwx_softc *sc, struct ieee80211_node *ni, int rsidx)
+iwx_rs_ht_rates(struct iwx_softc *sc, struct ieee80211_node *ni,
+    int min_mcs, int max_mcs)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
-	const struct ieee80211_ht_rateset *rs;
 	uint16_t htrates = 0;
 	int mcs;
 
-	rs = &ieee80211_std_ratesets_11n[rsidx];
-	for (mcs = rs->min_mcs; mcs <= rs->max_mcs; mcs++) {
+	for (mcs = min_mcs; mcs <= max_mcs; mcs++) {
 		if (!isset(ni->ni_rxmcs, mcs) ||
 		    !isset(ic->ic_sup_mcs, mcs))
 			continue;
-		htrates |= (1 << (mcs - rs->min_mcs));
+		htrates |= (1 << (mcs - min_mcs));
 	}
 
 	return htrates;
@@ -8373,12 +8305,10 @@ iwx_rs_init_v3(struct iwx_softc *sc, struct iwx_node *in)
 	} else if (ni->ni_flags & IEEE80211_NODE_HT) {
 		cfg_cmd.mode = IWX_TLC_MNG_MODE_HT;
 		cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] =
-		    htole16(iwx_rs_ht_rates(sc, ni,
-		    IEEE80211_HT_RATESET_SISO));
+		    htole16(iwx_rs_ht_rates(sc, ni, 0, 7));
 		if (iwx_mimo_enabled(sc)) {
 			cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] =
-			    htole16(iwx_rs_ht_rates(sc, ni,
-			    IEEE80211_HT_RATESET_MIMO2));
+			    htole16(iwx_rs_ht_rates(sc, ni, 8, 15));
 		}
 	} else
 		cfg_cmd.mode = IWX_TLC_MNG_MODE_NON_HT;
@@ -8478,12 +8408,10 @@ iwx_rs_init_v4(struct iwx_softc *sc, struct iwx_node *in)
 	} else if (ni->ni_flags & IEEE80211_NODE_HT) {
 		cfg_cmd.mode = IWX_TLC_MNG_MODE_HT;
 		cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] =
-		    htole16(iwx_rs_ht_rates(sc, ni,
-		    IEEE80211_HT_RATESET_SISO));
+		    htole16(iwx_rs_ht_rates(sc, ni, 0, 7));
 		if (iwx_mimo_enabled(sc)) {
 			cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] =
-			    htole16(iwx_rs_ht_rates(sc, ni,
-			    IEEE80211_HT_RATESET_MIMO2));
+			    htole16(iwx_rs_ht_rates(sc, ni, 8, 15));
 		}
 	} else
 		cfg_cmd.mode = IWX_TLC_MNG_MODE_NON_HT;
@@ -9061,9 +8989,9 @@ iwx_run_stop(struct iwx_softc *sc)
 }
 
 struct ieee80211_node *
-iwx_node_alloc(struct ieee80211com *ic)
+iwx_node_alloc(struct ieee80211_node_table *nt)
 {
-	return malloc(sizeof (struct iwx_node), M_DEVBUF, M_NOWAIT | M_ZERO);
+	return malloc(sizeof(struct iwx_node), M_DEVBUF, M_NOWAIT | M_ZERO);
 }
 
 int
@@ -9196,7 +9124,6 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 		iwx_del_task(sc, systq, &sc->ba_task);
 		iwx_del_task(sc, systq, &sc->mac_ctxt_task);
 		iwx_del_task(sc, systq, &sc->phy_ctxt_task);
-		iwx_del_task(sc, systq, &sc->bgscan_done_task);
 	}
 
 	sc->ns_nstate = nstate;
@@ -9815,15 +9742,10 @@ iwx_stop(struct ifnet *ifp)
 	iwx_del_task(sc, systq, &sc->ba_task);
 	iwx_del_task(sc, systq, &sc->mac_ctxt_task);
 	iwx_del_task(sc, systq, &sc->phy_ctxt_task);
-	iwx_del_task(sc, systq, &sc->bgscan_done_task);
 	KASSERT(sc->task_refs.r_refs >= 1);
 	refcnt_finalize(&sc->task_refs, "iwxstop");
 
 	iwx_stop_device(sc);
-
-	iwx_free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
-	sc->bgscan_unref_arg = NULL;
-	sc->bgscan_unref_arg_size = 0;
 
 	/* Reset soft state. */
 
@@ -9868,6 +9790,12 @@ iwx_stop(struct ifnet *ifp)
 	ifp->if_timer = 0;
 
 	splx(s);
+}
+
+static void
+iwx_stop_ifp(struct ifnet *ifp, int disable)
+{
+	iwx_stop(ifp);
 }
 
 void
@@ -9915,7 +9843,7 @@ iwx_ioctl(struct ifnet *ifp, u_long cmd, void * data)
 	 * Prevent processes from entering this function while another
 	 * process is tsleep'ing in it.
 	 */
-	rw_enter_write(&sc->ioctl_rwl);
+	rw_enter(&sc->ioctl_rwl, RW_WRITER);
 	if (generation != sc->sc_generation) {
 		rw_exit(&sc->ioctl_rwl);
 		return ENXIO;
@@ -11485,7 +11413,7 @@ iwx_preinit(struct iwx_softc *sc)
 	if (sc->attached) {
 		/* Update MAC in case the upper layers changed it. */
 		IEEE80211_ADDR_COPY(sc->sc_ic.ic_myaddr,
-		    ((struct arpcom *)ifp)->ac_enaddr);
+		    CLLADDR(sc->sc_ec.ec_if.if_sadl));
 		return 0;
 	}
 
@@ -11524,14 +11452,20 @@ iwx_preinit(struct iwx_softc *sc)
 		memset(&ic->ic_sup_rates[IEEE80211_MODE_11A], 0,
 		    sizeof(ic->ic_sup_rates[IEEE80211_MODE_11A]));
 
-	/* Configure channel information obtained from firmware. */
-	ieee80211_channel_init(ifp);
-
-	/* Configure MAC address. */
 	/* The link-level address is taken from ic_myaddr at ifattach. */
+	if_initialize(ifp);
+	ieee80211_ifattach(ic);
+	ifp->if_percpuq = if_percpuq_create(ifp);
+	if_register(ifp);
 
-	ieee80211_media_init(ifp, iwx_media_change, ieee80211_media_status);
+	mutex_init(&sc->sc_media_mtx, MUTEX_DEFAULT, IPL_SOFTNET);
+	ieee80211_media_init_with_lock(ic, iwx_media_change,
+	    ieee80211_media_status, &sc->sc_media_mtx);
+	ieee80211_announce(ic);
 
+#if NBPFILTER > 0
+	iwx_radiotap_attach(sc);
+#endif
 	return 0;
 }
 
@@ -11539,8 +11473,6 @@ void
 iwx_attach_hook(device_t self)
 {
 	struct iwx_softc *sc = device_private(self);
-
-	KASSERT(!cold);
 
 	iwx_preinit(sc);
 }
@@ -11668,7 +11600,7 @@ iwx_attach(device_t parent, device_t self, void *aux)
 	struct pci_attach_args *pa = aux;
 	pcireg_t reg, memtype;
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = ic->ic_ifp;
+	struct ifnet *ifp = &sc->sc_ec.ec_if;
 	const char *intrstr;
 	char intrbuf[PCI_INTRSTR_LEN];
 	const struct iwx_device_cfg *cfg;
@@ -11994,17 +11926,13 @@ iwx_attach(device_t parent, device_t self, void *aux)
 
 	/* Set device capabilities. */
 	ic->ic_caps =
-	    IEEE80211_C_QOS | IEEE80211_C_TX_AMPDU | /* A-MPDU */
-	    IEEE80211_C_ADDBA_OFFLOAD | /* device sends ADDBA/DELBA frames */
-	    IEEE80211_C_PMGT |		/* power management */
+	    IEEE80211_C_WME |		/* WME/QoS */
+	    IEEE80211_C_WPA |		/* WPA/RSN */
 	    IEEE80211_C_WEP |		/* WEP */
-	    IEEE80211_C_RSN |		/* WPA/RSN */
-	    IEEE80211_C_SCANALL |	/* device scans all channels at once */
-	    IEEE80211_C_SCANALLBAND |	/* device scans all bands at once */
+	    IEEE80211_C_PMGT |		/* power management */
 	    IEEE80211_C_MONITOR |	/* monitor mode supported */
 	    IEEE80211_C_SHSLOT |	/* short slot time supported */
-	    IEEE80211_C_SHPREAMBLE |	/* short preamble supported */
-	    IEEE80211_C_MFP;		/* management frame protection */
+	    IEEE80211_C_SHPREAMBLE;	/* short preamble supported */
 	ic->ic_flags |= IEEE80211_F_PMGTON;
 
 	ic->ic_htcaps = IEEE80211_HTCAP_SGI20 | IEEE80211_HTCAP_SGI40;
@@ -12038,20 +11966,17 @@ iwx_attach(device_t parent, device_t self, void *aux)
 	ic->ic_ibss_chan = &ic->ic_channels[1];
 
 
+	ic->ic_ifp = ifp;
 	ifp->if_softc = sc;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
+	ifp->if_init = iwx_init;
+	ifp->if_stop = iwx_stop_ifp;
 	ifp->if_ioctl = iwx_ioctl;
 	ifp->if_start = iwx_start;
 	ifp->if_watchdog = iwx_watchdog;
+	IFQ_SET_READY(&ifp->if_snd);
 	memcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
 
-	if_attach(ifp);
-	ieee80211_ifattach(ifp);
-	ieee80211_media_init(ifp, iwx_media_change, ieee80211_media_status);
-
-#if NBPFILTER > 0
-	iwx_radiotap_attach(sc);
-#endif
 	for (i = 0; i < nitems(sc->sc_rxba_data); i++) {
 		struct iwx_rxba_data *rxba = &sc->sc_rxba_data[i];
 		rxba->baid = IWX_RX_REORDER_DATA_INVALID_BAID;
@@ -12066,20 +11991,12 @@ iwx_attach(device_t parent, device_t self, void *aux)
 	task_set(&sc->ba_task, iwx_ba_task, sc);
 	task_set(&sc->mac_ctxt_task, iwx_mac_ctxt_task, sc);
 	task_set(&sc->phy_ctxt_task, iwx_phy_ctxt_task, sc);
-	task_set(&sc->bgscan_done_task, iwx_bgscan_done_task, sc);
 
 	ic->ic_node_alloc = iwx_node_alloc;
-	ic->ic_bgscan_start = iwx_bgscan;
-	ic->ic_bgscan_done = iwx_bgscan_done;
 
 	/* Override 802.11 state transition machine. */
 	sc->sc_newstate = ic->ic_newstate;
 	ic->ic_newstate = iwx_newstate;
-	ic->ic_updatechan = iwx_updatechan;
-	ic->ic_updateprot = iwx_updateprot;
-	ic->ic_updateslot = iwx_updateslot;
-	ic->ic_updateedca = iwx_updateedca;
-	ic->ic_updatedtim = iwx_updatedtim;
 	ic->ic_ampdu_rx_start = iwx_ampdu_rx_start;
 	ic->ic_ampdu_rx_stop = iwx_ampdu_rx_stop;
 	ic->ic_ampdu_tx_start = iwx_ampdu_tx_start;
@@ -12213,31 +12130,16 @@ int
 iwx_activate(device_t self, enum devact act)
 {
 	struct iwx_softc *sc = device_private(self);
-	struct ifnet *ifp = sc->sc_ic.ic_ifp;
-	int err = 0;
+	struct ifnet *ifp = IC2IFP(&sc->sc_ic);
 
 	switch (act) {
-	case DVACT_QUIESCE:
-		if (ifp->if_flags & IFF_RUNNING) {
-			rw_enter(&sc->ioctl_rwl, RW_WRITER);
+	case DVACT_DEACTIVATE:
+		if (ifp->if_flags & IFF_RUNNING)
 			iwx_stop(ifp);
-			rw_exit(&sc->ioctl_rwl);
-		}
-		break;
-	case DVACT_RESUME:
-		iwx_resume(sc);
-		break;
-	case DVACT_WAKEUP:
-		if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP) {
-			err = iwx_wakeup(sc);
-			if (err)
-				printf("%s: could not initialize hardware\n",
-				    DEVNAME(sc));
-		}
-		break;
+		return 0;
+	default:
+		return EOPNOTSUPP;
 	}
-
-	return 0;
 }
 
 CFATTACH_DECL_NEW(iwx, sizeof(struct iwx_softc), iwx_match, iwx_attach,

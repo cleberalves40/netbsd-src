@@ -405,10 +405,6 @@ static void	ieee80211_recv_addba_resp(struct ieee80211com *, struct mbuf *,
 	    struct ieee80211_node *);
 static void	ieee80211_recv_delba(struct ieee80211com *, struct mbuf *,
 	    struct ieee80211_node *);
-static void	ieee80211_addba_req_accept(struct ieee80211com *,
-	    struct ieee80211_node *, uint8_t);
-static void	ieee80211_addba_req_refuse(struct ieee80211com *,
-	    struct ieee80211_node *, uint8_t);
 
 static int
 ieee80211_input_management(struct ieee80211com *ic, struct mbuf **mp,
@@ -3574,7 +3570,7 @@ refuse:
 }
 
 /* Accept an ADDBA request: start the agreement and send the response. */
-static void
+void
 ieee80211_addba_req_accept(struct ieee80211com *ic,
     struct ieee80211_node *ni, uint8_t tid)
 {
@@ -3595,7 +3591,7 @@ ieee80211_addba_req_accept(struct ieee80211com *ic,
 }
 
 /* Refuse an ADDBA request: release the buffer and send the response. */
-static void
+void
 ieee80211_addba_req_refuse(struct ieee80211com *ic,
     struct ieee80211_node *ni, uint8_t tid)
 {

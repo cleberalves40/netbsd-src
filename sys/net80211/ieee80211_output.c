@@ -159,7 +159,7 @@ ieee80211_send_setup(struct ieee80211com *ic,
 /*
  * Add an HT Capabilities element (802.11-2016 9.4.2.56).
  */
-static u_int8_t *
+u_int8_t *
 ieee80211_add_htcaps(u_int8_t *frm, struct ieee80211com *ic)
 {
 	*frm++ = IEEE80211_ELEMID_HTCAP;
@@ -181,7 +181,7 @@ ieee80211_add_htcaps(u_int8_t *frm, struct ieee80211com *ic)
 /*
  * Add a VHT Capabilities element (802.11ac 8.4.2.160).
  */
-static u_int8_t *
+u_int8_t *
 ieee80211_add_vhtcaps(u_int8_t *frm, struct ieee80211com *ic)
 {
 	*frm++ = IEEE80211_ELEMID_VHTCAPS;

@@ -631,6 +631,8 @@ struct iwx_softc {
 	device_t		sc_dev;
 	pci_intr_handle_t	*sc_pihp;
 	void			*sc_soft_ih;
+	struct ethercom sc_ec;		/* ifnet, see sc_ic.ic_ifp */
+	kmutex_t	sc_media_mtx;
 	struct ieee80211com sc_ic;
 	int (*sc_newstate)(struct ieee80211com *, enum ieee80211_state, int);
 	int sc_newstate_pending;

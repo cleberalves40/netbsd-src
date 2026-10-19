@@ -278,6 +278,15 @@ int	ieee80211_send_action(struct ieee80211com *, struct ieee80211_node *,
 /* Block ack, transmit side (ieee80211_proto.c) */
 int	ieee80211_addba_request(struct ieee80211com *, struct ieee80211_node *,
 	    u_int16_t, u_int8_t);
+/* Build HT/VHT capability elements (driver probe requests). */
+u_int8_t *ieee80211_add_htcaps(u_int8_t *, struct ieee80211com *);
+u_int8_t *ieee80211_add_vhtcaps(u_int8_t *, struct ieee80211com *);
+/* Receive side: complete an ADDBA request, e.g. after ic_ampdu_rx_start
+ * returned EBUSY. */
+void	ieee80211_addba_req_accept(struct ieee80211com *,
+	    struct ieee80211_node *, uint8_t);
+void	ieee80211_addba_req_refuse(struct ieee80211com *,
+	    struct ieee80211_node *, uint8_t);
 void	ieee80211_addba_resp_accept(struct ieee80211com *,
 	    struct ieee80211_node *, uint8_t);
 void	ieee80211_addba_resp_refuse(struct ieee80211com *,
