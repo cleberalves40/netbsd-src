@@ -455,4 +455,10 @@ flsl(unsigned long x)
 	return b;
 }
 
+/* HT protection modes, 802.11n HT Operation bits 0-1. */
+#define IEEE80211_HTPROT_NONE		0
+#define IEEE80211_HTPROT_NONMEMBER	1
+#define IEEE80211_HTPROT_20MHZ		2
+#define IEEE80211_HTPROT_NONHT_MIXED	3
+
 #endif /* _DEV_PCI_IF_IWX_COMPAT_H_ */
