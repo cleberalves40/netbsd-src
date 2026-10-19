@@ -222,7 +222,12 @@ ccmp_decap(struct ieee80211_key *k, struct mbuf *m, int hdrlen)
 		return 0;
 	}
 	pn = READ_6(ivp[0], ivp[1], ivp[4], ivp[5], ivp[6], ivp[7]);
-	if (pn <= k->wk_keyrsc) {
+	/*
+	 * A later A-MSDU subframe of an MPDU whose first subframe was accepted
+	 * repeats that PN; accept it only when the driver marked it as such.
+	 */
+	if (pn < k->wk_keyrsc ||
+	    (pn == k->wk_keyrsc && (m->m_flags & M_AMSDU_SUBFRAME) == 0)) {
 		/*
 		 * Replay violation.
 		 */

@@ -168,6 +168,13 @@ struct mbuf *ieee80211_getmgtframe(u_int8_t **frm, u_int pktlen);
 #define	M_FIRSTFRAG	M_LINK5			/* first 802.11 fragment */
 #define	M_FF		M_LINK6			/* "fast frames" */
 /*
+ * Receive: the frame is an A-MSDU subframe after the first one of its MPDU,
+ * set by the driver.  Such subframes carry the same CCMP packet number as
+ * the first, which the replay check would otherwise reject.  The MIC is
+ * still verified.
+ */
+#define	M_AMSDU_SUBFRAME	M_LINK7
+/*
  * Encode WME access control bits in the PROTO flags.
  * This is safe since it's passed directly in to the
  * driver and there's no chance someone else will clobber

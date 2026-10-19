@@ -5222,8 +5222,9 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 	 * Leaving this in place for now since some 9k/AX200 hybrids seem
 	 * to exist that we may eventually add support for.)
 	 *
-	 * NB: subframes after the first share a CCMP PN, which the software
-	 * replay check in net80211 would reject. See the iwx port notes.
+	 * Subframes after the first share the CCMP PN of the MPDU. Mark them
+	 * so that net80211's software replay check accepts them; the MIC is
+	 * still verified.
 	 */
 	if (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) {
 		struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
@@ -5239,6 +5240,10 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 			qwh->i_qos[0] &= htole16(~IEEE80211_QOS_AMSDU);
 		}
 	}
+
+	if ((desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) &&
+	    (desc->amsdu_info & IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK) != 0)
+		m->m_flags |= M_AMSDU_SUBFRAME;
 
 	if (iwx_detect_duplicate(sc, m, desc)) {
 		m_freem(m);
