@@ -2649,3 +2649,137 @@ ieee80211_clear_vhtcaps(struct ieee80211_node *ni)
 	ni->ni_vht_tx_max_lgi_mbit_s = 0;
 	ni->ni_flags &= ~IEEE80211_NODE_VHT;
 }
+
+/*
+ * Parse the HE Capabilities element (802.11ax 9.4.2.248).  data is the
+ * body after the extension ID.  NODE_HECAP is set on success.  Returns
+ * 0, or EINVAL for a malformed element.
+ */
+int
+ieee80211_setup_hecaps(struct ieee80211_node *ni, const u_int8_t *data,
+    u_int8_t len)
+{
+	u_int8_t phycap0;
+	const u_int8_t *mcs;
+	int mcslen;
+
+	if (len < IEEE80211_HE_CAPS_FIXED_LEN + IEEE80211_HE_MCS_NSS_80_LEN)
+		return EINVAL;
+
+	/* the Tx/Rx MCS NSS fields depend on the channel width bits */
+	phycap0 = data[IEEE80211_HE_MAC_CAPS_LEN];
+	mcslen = IEEE80211_HE_MCS_NSS_SIZE(phycap0);
+	if (len < IEEE80211_HE_CAPS_FIXED_LEN + mcslen)
+		return EINVAL;
+
+	memcpy(ni->ni_he_mac_cap, data, IEEE80211_HE_MAC_CAPS_LEN);
+	memcpy(ni->ni_he_phy_cap, data + IEEE80211_HE_MAC_CAPS_LEN,
+	    IEEE80211_HE_PHY_CAPS_LEN);
+
+	mcs = data + IEEE80211_HE_CAPS_FIXED_LEN;
+	ni->ni_he_rxmcs_80 = mcs[0] | (mcs[1] << 8);
+	ni->ni_he_txmcs_80 = mcs[2] | (mcs[3] << 8);
+	mcs += 4;
+
+	if (phycap0 & IEEE80211_HE_PHYCAP0_CHAN_WIDTH_160_IN_5G) {
+		ni->ni_he_rxmcs_160 = mcs[0] | (mcs[1] << 8);
+		ni->ni_he_txmcs_160 = mcs[2] | (mcs[3] << 8);
+		mcs += 4;
+	} else {
+		ni->ni_he_rxmcs_160 = 0;
+		ni->ni_he_txmcs_160 = 0;
+	}
+
+	if (phycap0 & IEEE80211_HE_PHYCAP0_CHAN_WIDTH_8080_IN_5G) {
+		ni->ni_he_rxmcs_80p80 = mcs[0] | (mcs[1] << 8);
+		ni->ni_he_txmcs_80p80 = mcs[2] | (mcs[3] << 8);
+	} else {
+		ni->ni_he_rxmcs_80p80 = 0;
+		ni->ni_he_txmcs_80p80 = 0;
+	}
+
+	ni->ni_flags |= IEEE80211_NODE_HECAP;
+	return 0;
+}
+
+/* Forget the HE state of a peer that is not, or is no longer, HE. */
+void
+ieee80211_clear_hecaps(struct ieee80211_node *ni)
+{
+	memset(ni->ni_he_mac_cap, 0, sizeof(ni->ni_he_mac_cap));
+	memset(ni->ni_he_phy_cap, 0, sizeof(ni->ni_he_phy_cap));
+	ni->ni_he_rxmcs_80 = 0;
+	ni->ni_he_txmcs_80 = 0;
+	ni->ni_he_rxmcs_160 = 0;
+	ni->ni_he_txmcs_160 = 0;
+	ni->ni_he_rxmcs_80p80 = 0;
+	ni->ni_he_txmcs_80p80 = 0;
+	ni->ni_flags &= ~(IEEE80211_NODE_HE | IEEE80211_NODE_HECAP);
+}
+
+/*
+ * Parse the HE Operation element (802.11ax 9.4.2.249).  The basic MCS
+ * set is carried only in Beacons and Probe Responses (isprobe).
+ * Returns 1 on success, 0 if the element is too short.
+ */
+int
+ieee80211_setup_heop(struct ieee80211_node *ni, const u_int8_t *data,
+    u_int8_t len, int isprobe)
+{
+	if (len < IEEE80211_HEOP_FIXED_LEN)
+		return 0;
+
+	memcpy(ni->ni_he_oper_params, data, IEEE80211_HEOP_PARAMS_LEN);
+	if (isprobe)
+		ni->ni_he_basic_mcs = data[4] | (data[5] << 8);
+	return 1;
+}
+
+/* Does the peer advertise HE with an MCS 0-7 rate for one stream? */
+static int
+ieee80211_node_supports_he(struct ieee80211_node *ni)
+{
+	uint16_t rx_mcs;
+
+	rx_mcs = (ni->ni_he_rxmcs_80 & IEEE80211_HE_MCS_FOR_SS_MASK(1)) >>
+	    IEEE80211_HE_MCS_FOR_SS_SHIFT(1);
+	return (ni->ni_flags & IEEE80211_NODE_HECAP) &&
+	    rx_mcs != IEEE80211_HE_MCS_SS_NOT_SUPP;
+}
+
+/*
+ * Decide whether HE is used with a peer, as OpenBSD does.  HE builds
+ * upon HT, so both sides must be HT.  As a station we must support the
+ * AP's basic MCS set.  OpenBSD also checks the channel's HE flag, which
+ * NetBSD channels do not carry; HE is allowed wherever HT is.
+ */
+void
+ieee80211_he_negotiate(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+	int n;
+
+	ni->ni_flags &= ~IEEE80211_NODE_HE;
+	if (!IEEE80211_HE_CAPABLE(ic) || !(ni->ni_flags & IEEE80211_NODE_HT))
+		return;
+	if (((ic->ic_he_rxmcs_80 & IEEE80211_HE_MCS_FOR_SS_MASK(1)) >>
+	    IEEE80211_HE_MCS_FOR_SS_SHIFT(1)) == IEEE80211_HE_MCS_SS_NOT_SUPP)
+		return;
+	if (!ieee80211_node_supports_he(ni))
+		return;
+
+	if (ic->ic_opmode == IEEE80211_M_STA) {
+		for (n = 1; n <= IEEE80211_HE_NUM_SS; n++) {
+			uint16_t basic_mcs = (ni->ni_he_basic_mcs &
+			    IEEE80211_HE_MCS_FOR_SS_MASK(n)) >>
+			    IEEE80211_HE_MCS_FOR_SS_SHIFT(n);
+			uint16_t rx_mcs = (ic->ic_he_rxmcs_80 &
+			    IEEE80211_HE_MCS_FOR_SS_MASK(n)) >>
+			    IEEE80211_HE_MCS_FOR_SS_SHIFT(n);
+			if (basic_mcs != IEEE80211_HE_MCS_SS_NOT_SUPP &&
+			    basic_mcs > rx_mcs)
+				return;
+		}
+	}
+
+	ni->ni_flags |= IEEE80211_NODE_HE;
+}

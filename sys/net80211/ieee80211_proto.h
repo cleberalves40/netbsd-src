@@ -292,6 +292,10 @@ int	ieee80211_setup_htcaps(struct ieee80211_node *, const u_int8_t *, u_int8_t);
 void	ieee80211_clear_htcaps(struct ieee80211_node *);
 int	ieee80211_setup_vhtcaps(struct ieee80211_node *, const u_int8_t *, u_int8_t);
 void	ieee80211_clear_vhtcaps(struct ieee80211_node *);
+int	ieee80211_setup_hecaps(struct ieee80211_node *, const u_int8_t *, u_int8_t);
+void	ieee80211_clear_hecaps(struct ieee80211_node *);
+int	ieee80211_setup_heop(struct ieee80211_node *, const u_int8_t *, u_int8_t, int);
+void	ieee80211_he_negotiate(struct ieee80211com *, struct ieee80211_node *);
 void	ieee80211_ampdu_trigger(struct ieee80211com *, struct ieee80211_node *,
 	    int, u_int16_t);
 

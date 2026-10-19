@@ -239,4 +239,16 @@
 #define IEEE80211_HEOP_FIXED_LEN		(IEEE80211_HEOP_PARAMS_LEN + \
 					IEEE80211_HEOP_BASIC_MCS_LEN)
 
+/* Extension element (EID 255) carrying the HE elements (ext IDs 35/36). */
+#define IEEE80211_ELEMID_EXTENSION	255
+
+/*
+ * The driver advertises HE by filling in its HE PHY capabilities (the
+ * first byte is the channel-width set, never zero on an HE device) and
+ * requires HT, as HE builds upon HT.  Used by the attach-time and
+ * association code.
+ */
+#define IEEE80211_HE_CAPABLE(_ic)	\
+	((_ic)->ic_htcaps != 0 && (_ic)->ic_he_phy_cap[0] != 0)
+
 #endif /* !_NET80211_IEEE80211_HT_H_ */
