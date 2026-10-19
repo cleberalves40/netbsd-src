@@ -379,6 +379,8 @@ out:
 }
 
 /* HT/VHT capabilities of a peer (see the end of this file). */
+static void	ieee80211_input_hehe(struct ieee80211com *,
+    struct ieee80211_node *, const u_int8_t *, const u_int8_t *, int);
 static void	ieee80211_input_htvht(struct ieee80211com *,
 	    struct ieee80211_node *, const u_int8_t *, const u_int8_t *);
 
@@ -2199,6 +2201,14 @@ ieee80211_recv_mgmt_beacon(struct ieee80211com *ic, struct mbuf *m0,
 		case IEEE80211_ELEMID_VHTCAPS:
 			scan.sp_vhtcaps = frm;
 			break;
+		case IEEE80211_ELEMID_EXTENSION:
+			if (frm[1] < 1)
+				break;
+			if (frm[2] == IEEE80211_ELEMID_EXT_HECAPS)
+				scan.sp_hecaps = frm;
+			else if (frm[2] == IEEE80211_ELEMID_EXT_HEOP)
+				scan.sp_heop = frm;
+			break;
 		case IEEE80211_ELEMID_ERP:
 			if (frm[1] != 1) {
 				IEEE80211_DISCARD_IE(ic, IEEE80211_MSG_ELEMID,
@@ -2286,6 +2296,8 @@ ieee80211_recv_mgmt_beacon(struct ieee80211com *ic, struct mbuf *m0,
 
 	/* HT and VHT capabilities advertised by the BSS */
 	ieee80211_input_htvht(ic, ni, scan.sp_htcaps, scan.sp_vhtcaps);
+	ieee80211_input_hehe(ic, ni, scan.sp_hecaps, scan.sp_heop,
+	    subtype == IEEE80211_FC0_SUBTYPE_PROBE_RESP);
 
 	/*
 	 * Count frame now that we know it's to be processed.
@@ -2825,7 +2837,7 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 	struct ieee80211_frame *wh;
 	u_int8_t *frm, *efrm;
 	u_int8_t *rates, *xrates, *wme;
-	u_int8_t *htcaps, *vhtcaps;
+	u_int8_t *htcaps, *vhtcaps, *hecaps, *heop;
 	u_int8_t rate;
 	IEEE80211_DEBUGVAR(char ebuf[3 * ETHER_ADDR_LEN]);
 	u_int16_t capinfo, associd;
@@ -2871,6 +2883,7 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 
 	rates = xrates = wme = NULL;
 	htcaps = vhtcaps = NULL;
+	hecaps = heop = NULL;
 	while (frm + 1 < efrm) {
 		IEEE80211_VERIFY_LENGTH(efrm - frm, frm[1] + 2);
 
@@ -2887,6 +2900,14 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 		case IEEE80211_ELEMID_VHTCAPS:
 			vhtcaps = frm;
 			break;
+		case IEEE80211_ELEMID_EXTENSION:
+			if (frm[1] < 1)
+				break;
+			if (frm[2] == IEEE80211_ELEMID_EXT_HECAPS)
+				hecaps = frm;
+			else if (frm[2] == IEEE80211_ELEMID_EXT_HEOP)
+				heop = frm;
+			break;
 		case IEEE80211_ELEMID_VENDOR:
 			if (iswmeoui(frm))
 				wme = frm;
@@ -2898,6 +2919,7 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 	}
 
 	ieee80211_input_htvht(ic, ni, htcaps, vhtcaps);
+	ieee80211_input_hehe(ic, ni, hecaps, heop, 0);
 
 	IEEE80211_VERIFY_ELEMENT(rates, IEEE80211_RATE_MAXSIZE);
 
@@ -3943,6 +3965,32 @@ ieee80211_node_rx_ba_clear(struct ieee80211_node *ni, int tid)
 	ba->ba_winmiss = 0;
 	ba->ba_missedsn = 0;
 	ba->ba_head = 0;
+}
+
+/*
+ * Apply the HE capabilities and operation a peer advertised.  The
+ * element pointers address the element header; the data starts after
+ * the extension ID, at offset 3.  HE is used only on top of HT, and
+ * only when the driver advertises HE.  A peer whose HE Capabilities
+ * element is missing or unusable has its HE state cleared.
+ */
+static void
+ieee80211_input_hehe(struct ieee80211com *ic, struct ieee80211_node *ni,
+    const u_int8_t *hecaps, const u_int8_t *heop, int isprobe)
+{
+	if (hecaps == NULL || hecaps[1] < 1 || !IEEE80211_HE_CAPABLE(ic) ||
+	    !(ni->ni_flags & IEEE80211_NODE_HT) ||
+	    ieee80211_setup_hecaps(ni, hecaps + 3, hecaps[1] - 1) != 0) {
+		ieee80211_clear_hecaps(ni);
+		return;
+	}
+
+	if (heop != NULL && heop[1] >= 1)
+		ieee80211_setup_heop(ni, heop + 3, heop[1] - 1, isprobe);
+	else
+		ni->ni_he_basic_mcs = 0;
+
+	ieee80211_he_negotiate(ic, ni);
 }
 
 /*
