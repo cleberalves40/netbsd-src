@@ -68,6 +68,9 @@
 #define IEEE80211_DELBA_INITIATOR	0x0800
 #define IEEE80211_DELBA_TID_INFO_SHIFT	12
 
+/* Status code for a refused ADDBA; absent from the NetBSD enum */
+#define IEEE80211_STATUS_REFUSED	37
+
 /* Reason codes used by block ack; absent from the NetBSD enum */
 #define IEEE80211_REASON_SETUP_REQUIRED	38
 #define IEEE80211_REASON_TIMEOUT		39

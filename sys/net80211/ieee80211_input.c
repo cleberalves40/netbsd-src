@@ -381,6 +381,19 @@ out:
 /*
  * Input code for a MANAGEMENT frame.
  */
+static void	ieee80211_recv_action(struct ieee80211com *, struct mbuf *,
+	    struct ieee80211_node *, int, u_int32_t);
+static void	ieee80211_recv_addba_req(struct ieee80211com *, struct mbuf *,
+	    struct ieee80211_node *);
+static void	ieee80211_recv_addba_resp(struct ieee80211com *, struct mbuf *,
+	    struct ieee80211_node *);
+static void	ieee80211_recv_delba(struct ieee80211com *, struct mbuf *,
+	    struct ieee80211_node *);
+static void	ieee80211_addba_req_accept(struct ieee80211com *,
+	    struct ieee80211_node *, uint8_t);
+static void	ieee80211_addba_req_refuse(struct ieee80211com *,
+	    struct ieee80211_node *, uint8_t);
+
 static int
 ieee80211_input_management(struct ieee80211com *ic, struct mbuf **mp,
     struct ieee80211_node *ni, int rssi, u_int32_t rstamp)
@@ -3070,6 +3083,10 @@ ieee80211_recv_mgmt(struct ieee80211com *ic, struct mbuf *m0,
 		ieee80211_recv_mgmt_disassoc(ic, m0, ni, subtype, rssi, rstamp);
 		return;
 
+	case IEEE80211_FC0_SUBTYPE_ACTION:
+		ieee80211_recv_action(ic, m0, ni, rssi, rstamp);
+		return;
+
 	default:
 		IEEE80211_DISCARD(ic, IEEE80211_MSG_ANY,
 		     wh, "mgt", "subtype 0x%x not handled", subtype);
@@ -3328,3 +3345,292 @@ ieee80211_discard_mac(struct ieee80211com *ic,
 	printf("\n");
 }
 #endif /* IEEE80211_DEBUG */
+
+/*
+ * Block ack action frames, receive side (802.11-2012 10.24.x), ported
+ * from OpenBSD ieee80211_input.c.  The frame arrives with the 802.11
+ * header at the start of the mbuf; the action payload follows it.
+ */
+static void
+ieee80211_recv_action(struct ieee80211com *ic, struct mbuf *m,
+    struct ieee80211_node *ni, int rssi, u_int32_t rstamp)
+{
+	const struct ieee80211_frame *wh;
+	const u_int8_t *frm;
+
+	if (m->m_len < sizeof(*wh) + 2)
+		return;
+	wh = mtod(m, const struct ieee80211_frame *);
+	frm = (const u_int8_t *)(wh + 1);
+
+	switch (frm[0]) {
+	case IEEE80211_CATEG_BA:
+		switch (frm[1]) {
+		case IEEE80211_ACTION_ADDBA_REQ:
+			ieee80211_recv_addba_req(ic, m, ni);
+			break;
+		case IEEE80211_ACTION_ADDBA_RESP:
+			ieee80211_recv_addba_resp(ic, m, ni);
+			break;
+		case IEEE80211_ACTION_DELBA:
+			ieee80211_recv_delba(ic, m, ni);
+			break;
+		}
+		break;
+	default:
+		/* other categories are not handled yet */
+		break;
+	}
+}
+
+/*
+ * ADDBA request from the peer.  Not ported yet: the PBAC/PBAR and
+ * per-TID no-ACK policies, and the check that the peer is an HT
+ * station (needs HT element parsing, phase 2).
+ */
+static void
+ieee80211_recv_addba_req(struct ieee80211com *ic, struct mbuf *m,
+    struct ieee80211_node *ni)
+{
+	const struct ieee80211_frame *wh;
+	const u_int8_t *frm;
+	struct ieee80211_rx_ba *ba;
+	u_int16_t params, ssn, bufsz, timeout;
+	u_int8_t token, tid;
+	int err = 0;
+
+	/* Ignore unless we are ready to receive data frames. */
+	if (ic->ic_state != IEEE80211_S_RUN)
+		return;
+	if (m->m_len < sizeof(*wh) + 9)
+		return;
+
+	/* MLME-ADDBA.indication */
+	wh = mtod(m, const struct ieee80211_frame *);
+	frm = (const u_int8_t *)(wh + 1);
+
+	token = frm[2];
+	params = le16dec(&frm[3]);
+	tid = (params & IEEE80211_ADDBA_TID_MASK) >> IEEE80211_ADDBA_TID_SHIFT;
+	bufsz = (params & IEEE80211_ADDBA_BUFSZ_MASK) >>
+	    IEEE80211_ADDBA_BUFSZ_SHIFT;
+	timeout = le16dec(&frm[5]);
+	ssn = le16dec(&frm[7]) >> IEEE80211_SEQ_SEQ_SHIFT;
+
+	ba = &ni->ni_rx_ba[tid];
+	/* The driver is still processing an ADDBA request for this TID. */
+	if (ba->ba_state == IEEE80211_BA_REQUESTED)
+		return;
+	/* An agreement already exists: reset its inactivity timer. */
+	if (ba->ba_state == IEEE80211_BA_AGREED) {
+		if (ba->ba_timeout_val != 0)
+			ba->ba_ticks_left =
+			    (ba->ba_timeout_val + 999999) / 1000000;
+		return;
+	}
+
+	/* The peer must accept our Block Ack policy. */
+	if (!(ic->ic_htcaps & IEEE80211_HTCAP_DELAYEDBA) &&
+	    !(params & IEEE80211_ADDBA_BA_POLICY))
+		goto refuse;
+
+	/* set up the agreement */
+	ba->ba_state = IEEE80211_BA_REQUESTED;
+	ba->ba_timeout_val = timeout * IEEE80211_DUR_TU;
+	ba->ba_ticks_left = 0;
+	ba->ba_ni = ni;
+	ba->ba_token = token;
+	ba->ba_gapwait = 0;
+	ba->ba_winsize = bufsz;
+	if (ba->ba_winsize == 0 || ba->ba_winsize > IEEE80211_BA_MAX_WINSZ)
+		ba->ba_winsize = IEEE80211_BA_MAX_WINSZ;
+	ba->ba_params = (params & IEEE80211_ADDBA_BA_POLICY);
+	ba->ba_params |= ((ba->ba_winsize << IEEE80211_ADDBA_BUFSZ_SHIFT) |
+	    (tid << IEEE80211_ADDBA_TID_SHIFT));
+	ba->ba_params |= IEEE80211_ADDBA_AMSDU;
+	ba->ba_winstart = ssn;
+	ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+
+	/* allocate the reordering buffer */
+	ba->ba_buf = malloc(IEEE80211_BA_MAX_WINSZ * sizeof(*ba->ba_buf),
+	    M_DEVBUF, M_NOWAIT | M_ZERO);
+	if (ba->ba_buf == NULL) {
+		/* do not leave the TID stuck in REQUESTED */
+		ba->ba_state = IEEE80211_BA_INIT;
+		goto refuse;
+	}
+	ba->ba_head = 0;
+
+	/* tell the driver about the new agreement */
+	if (ic->ic_ampdu_rx_start != NULL)
+		err = ic->ic_ampdu_rx_start(ic, ni, tid);
+	if (err == EBUSY) {
+		/* the driver accepts or refuses when it is done */
+		return;
+	} else if (err) {
+		/* driver failed to set up, roll back */
+		ieee80211_addba_req_refuse(ic, ni, tid);
+	} else
+		ieee80211_addba_req_accept(ic, ni, tid);
+	return;
+
+refuse:
+	/* MLME-ADDBA.response */
+	(void)ieee80211_send_action(ic, ni, IEEE80211_CATEG_BA,
+	    IEEE80211_ACTION_ADDBA_RESP,
+	    IEEE80211_STATUS_REFUSED << 16 | token << 8 | tid);
+}
+
+/* Accept an ADDBA request: start the agreement and send the response. */
+static void
+ieee80211_addba_req_accept(struct ieee80211com *ic,
+    struct ieee80211_node *ni, uint8_t tid)
+{
+	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+
+	ba->ba_state = IEEE80211_BA_AGREED;
+
+	/* start the inactivity timer, rounded up to whole seconds */
+	if (ba->ba_timeout_val != 0) {
+		ba->ba_ticks_left = (ba->ba_timeout_val + 999999) / 1000000;
+		ieee80211_ba_arm(ic);
+	}
+
+	/* MLME-ADDBA.response */
+	(void)ieee80211_send_action(ic, ni, IEEE80211_CATEG_BA,
+	    IEEE80211_ACTION_ADDBA_RESP,
+	    IEEE80211_STATUS_SUCCESS << 16 | ba->ba_token << 8 | tid);
+}
+
+/* Refuse an ADDBA request: release the buffer and send the response. */
+static void
+ieee80211_addba_req_refuse(struct ieee80211com *ic,
+    struct ieee80211_node *ni, uint8_t tid)
+{
+	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+
+	free(ba->ba_buf, M_DEVBUF);
+	ba->ba_buf = NULL;
+	ba->ba_state = IEEE80211_BA_INIT;
+
+	/* MLME-ADDBA.response */
+	(void)ieee80211_send_action(ic, ni, IEEE80211_CATEG_BA,
+	    IEEE80211_ACTION_ADDBA_RESP,
+	    IEEE80211_STATUS_REFUSED << 16 | ba->ba_token << 8 | tid);
+}
+
+/* ADDBA response to a request we sent. */
+static void
+ieee80211_recv_addba_resp(struct ieee80211com *ic, struct mbuf *m,
+    struct ieee80211_node *ni)
+{
+	const struct ieee80211_frame *wh;
+	const u_int8_t *frm;
+	struct ieee80211_tx_ba *ba;
+	u_int16_t status, params;
+	u_int8_t token, tid;
+	int err = 0;
+
+	if (m->m_len < sizeof(*wh) + 9)
+		return;
+	wh = mtod(m, const struct ieee80211_frame *);
+	frm = (const u_int8_t *)(wh + 1);
+
+	token = frm[2];
+	status = le16dec(&frm[3]);
+	params = le16dec(&frm[5]);
+	tid = (params & IEEE80211_ADDBA_TID_MASK) >> IEEE80211_ADDBA_TID_SHIFT;
+
+	/* Ignore unless we have a request outstanding for this TID. */
+	ba = &ni->ni_tx_ba[tid];
+	if (ba->ba_state != IEEE80211_BA_REQUESTED)
+		return;
+	if (token != ba->ba_token)
+		return;
+
+	/* the response arrived, so stop the response timeout */
+	ni->ni_addba_req_timer[tid] = 0;
+
+	if (status != IEEE80211_STATUS_SUCCESS) {
+		if (ni->ni_addba_req_intval[tid] <
+		    IEEE80211_ADDBA_REQ_INTVAL_MAX)
+			ni->ni_addba_req_intval[tid]++;
+
+		ieee80211_addba_resp_refuse(ic, ni, tid, status);
+
+		/* the peer may think an agreement exists: try to delete it */
+		(void)ieee80211_send_action(ic, ni, IEEE80211_CATEG_BA,
+		    IEEE80211_ACTION_DELBA,
+		    IEEE80211_REASON_SETUP_REQUIRED << 16 | 1 << 8 | tid);
+		return;
+	}
+
+	/* tell the driver about the new agreement */
+	if (ic->ic_ampdu_tx_start != NULL)
+		err = ic->ic_ampdu_tx_start(ic, ni, tid);
+	if (err == EBUSY) {
+		/* the driver accepts or refuses when it is done */
+		return;
+	} else if (err) {
+		/* driver failed to set up, roll back */
+		ieee80211_addba_resp_refuse(ic, ni, tid,
+		    IEEE80211_STATUS_UNSPECIFIED);
+	} else
+		ieee80211_addba_resp_accept(ic, ni, tid);
+}
+
+/* DELBA: the peer is tearing an agreement down. */
+static void
+ieee80211_recv_delba(struct ieee80211com *ic, struct mbuf *m,
+    struct ieee80211_node *ni)
+{
+	const struct ieee80211_frame *wh;
+	const u_int8_t *frm;
+	u_int16_t params, reason;
+	u_int8_t tid;
+	int i;
+
+	if (m->m_len < sizeof(*wh) + 6)
+		return;
+	wh = mtod(m, const struct ieee80211_frame *);
+	frm = (const u_int8_t *)(wh + 1);
+
+	params = le16dec(&frm[2]);
+	reason = le16dec(&frm[4]);
+	(void)reason;	/* informational only; the peer's reason does not change our state */
+	tid = params >> IEEE80211_DELBA_TID_INFO_SHIFT;
+
+	if (params & IEEE80211_DELBA_INITIATOR) {
+		/* MLME-DELBA.indication(Originator): the peer's transmit side */
+		struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+
+		if (ba->ba_state != IEEE80211_BA_AGREED)
+			return;
+		if (ic->ic_ampdu_rx_stop != NULL)
+			ic->ic_ampdu_rx_stop(ic, ni, tid);
+
+		ba->ba_state = IEEE80211_BA_INIT;
+		ba->ba_ticks_left = 0;
+		ba->ba_gapwait = 0;
+
+		if (ba->ba_buf != NULL) {
+			/* free the MSDUs held in the reordering buffer */
+			for (i = 0; i < IEEE80211_BA_MAX_WINSZ; i++)
+				m_freem(ba->ba_buf[i].m);
+			free(ba->ba_buf, M_DEVBUF);
+			ba->ba_buf = NULL;
+		}
+	} else {
+		/* MLME-DELBA.indication(Recipient): our transmit side */
+		struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+
+		if (ba->ba_state != IEEE80211_BA_AGREED)
+			return;
+		if (ic->ic_ampdu_tx_stop != NULL)
+			ic->ic_ampdu_tx_stop(ic, ni, tid);
+
+		ba->ba_state = IEEE80211_BA_INIT;
+		ba->ba_ticks_left = 0;
+		ni->ni_addba_req_timer[tid] = 0;
+	}
+}

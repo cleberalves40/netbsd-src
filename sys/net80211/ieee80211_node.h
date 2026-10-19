@@ -125,6 +125,7 @@ struct ieee80211_rx_ba {
 	u_int16_t		ba_head;
 	int			ba_gapwait;	/* frames held behind a gap */
 	int			ba_ticks_left;	/* seconds to inactivity timeout, 0 = off */
+	u_int8_t		ba_token;	/* dialog token from the peer */
 };
 
 struct ieee80211_node {

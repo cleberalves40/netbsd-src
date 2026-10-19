@@ -1181,7 +1181,7 @@ ieee80211_node_tx_ba_clear(struct ieee80211_node *ni, int tid)
 }
 
 /* Make sure ieee80211_watchdog() keeps running while a timer is armed. */
-static void
+void
 ieee80211_ba_arm(struct ieee80211com *ic)
 {
 	if (ic->ic_ifp != NULL)
@@ -1328,6 +1328,7 @@ ieee80211_ba_node_tick(struct ieee80211com *ic, struct ieee80211_node *ni,
 
 	for (tid = 0; tid < IEEE80211_NUM_TID; tid++) {
 		struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+		struct ieee80211_rx_ba *rba;
 
 		if (ni->ni_addba_req_timer[tid] > 0) {
 			if (--ni->ni_addba_req_timer[tid] == 0) {
@@ -1355,6 +1356,16 @@ ieee80211_ba_node_tick(struct ieee80211com *ic, struct ieee80211_node *ni,
 				ieee80211_delba_request(ic, ni,
 				    IEEE80211_REASON_TIMEOUT, 1, tid);
 			} else
+				*pending = 1;
+		}
+
+		/* receive side: the peer's agreement inactivity timeout */
+		rba = &ni->ni_rx_ba[tid];
+		if (rba->ba_ticks_left > 0) {
+			if (--rba->ba_ticks_left == 0)
+				ieee80211_delba_request(ic, ni,
+				    IEEE80211_REASON_TIMEOUT, 0, tid);
+			else
 				*pending = 1;
 		}
 	}
