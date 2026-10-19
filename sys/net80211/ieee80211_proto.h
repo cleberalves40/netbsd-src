@@ -60,6 +60,8 @@ void	ieee80211_proto_detach(struct ieee80211com *);
 struct ieee80211_node;
 int	ieee80211_input(struct ieee80211com *, struct mbuf *,
 		struct ieee80211_node *, int, u_int32_t);
+int	ieee80211_input_ampdu_done(struct ieee80211com *, struct mbuf *,
+	    struct ieee80211_node *, int, u_int32_t);
 int	ieee80211_setup_rates(struct ieee80211_node *ni,
 		const u_int8_t *rates, const u_int8_t *xrates, int flags);
 void	ieee80211_saveie(u_int8_t **, const u_int8_t *);

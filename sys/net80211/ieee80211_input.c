@@ -535,9 +535,32 @@ ieee80211_input_control(struct ieee80211com *ic, struct mbuf *m,
  * mean ``better signal''.  The receive timestamp is currently not used
  * by the 802.11 layer.
  */
+static int ieee80211_input_common(struct ieee80211com *, struct mbuf *,
+	struct ieee80211_node *, int, u_int32_t, int);
+
 int
 ieee80211_input(struct ieee80211com *ic, struct mbuf *m,
 	struct ieee80211_node *ni, int rssi, u_int32_t rstamp)
+{
+	return ieee80211_input_common(ic, m, ni, rssi, rstamp, 0);
+}
+
+/*
+ * As ieee80211_input(), for a driver whose firmware has already
+ * performed the A-MPDU reordering for this frame (the frame was released
+ * in sequence order).  The host reorder buffer is bypassed so the frame
+ * is not held a second time.
+ */
+int
+ieee80211_input_ampdu_done(struct ieee80211com *ic, struct mbuf *m,
+	struct ieee80211_node *ni, int rssi, u_int32_t rstamp)
+{
+	return ieee80211_input_common(ic, m, ni, rssi, rstamp, 1);
+}
+
+static int
+ieee80211_input_common(struct ieee80211com *ic, struct mbuf *m,
+	struct ieee80211_node *ni, int rssi, u_int32_t rstamp, int ampdu_done)
 {
 #define	SEQ_LEQ(a,b)	((int)((a)-(b)) <= 0)
 #define	HAS_SEQ(type)	((type & 0x4) == 0)
@@ -748,7 +771,7 @@ ieee80211_input(struct ieee80211com *ic, struct mbuf *m,
 			 * OpenBSD.  Frames it keeps are released later
 			 * through ieee80211_input_data().
 			 */
-			if (type == IEEE80211_FC0_TYPE_DATA &&
+			if (!ampdu_done && type == IEEE80211_FC0_TYPE_DATA &&
 			    ieee80211_has_qos(wh) &&
 			    ieee80211_input_ba(ic, &m, ni, tid, rxseq,
 			    rssi, rstamp))
