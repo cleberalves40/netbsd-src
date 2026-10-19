@@ -124,7 +124,7 @@
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_radiotap.h>
 
-#define DEVNAME(_s)	((_s)->sc_dev.dv_xname)
+#define DEVNAME(_s)	device_xname((_s)->sc_dev)
 
 #define IC2IFP(_ic_) ((_ic_)->ic_ifp)
 
@@ -489,15 +489,16 @@ int	iwx_rx_pkt_valid(struct iwx_rx_packet *);
 void	iwx_rx_pkt(struct iwx_softc *, struct iwx_rx_data *,
 	    struct mbuf_list *);
 void	iwx_notif_intr(struct iwx_softc *);
+void	iwx_softintr(void *);
 int	iwx_intr(void *);
 int	iwx_intr_msix(void *);
-int	iwx_match(struct device *, void *, void *);
+int	iwx_match(device_t, cfdata_t, void *);
 int	iwx_preinit(struct iwx_softc *);
-void	iwx_attach_hook(struct device *);
+void	iwx_attach_hook(device_t);
 const struct iwx_device_cfg *iwx_find_device_cfg(struct iwx_softc *);
-void	iwx_attach(struct device *, struct device *, void *);
+void	iwx_attach(device_t, device_t, void *);
 void	iwx_init_task(void *);
-int	iwx_activate(struct device *, int);
+int	iwx_activate(device_t, enum devact);
 void	iwx_resume(struct iwx_softc *);
 int	iwx_wakeup(struct iwx_softc *);
 
@@ -10914,6 +10915,14 @@ iwx_notif_intr(struct iwx_softc *sc)
 		IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, hw & ~7);
 }
 
+void
+iwx_softintr(void *arg)
+{
+	struct iwx_softc *sc = arg;
+
+	iwx_notif_intr(sc);
+}
+
 int
 iwx_intr(void *arg)
 {
@@ -11041,7 +11050,7 @@ iwx_intr(void *arg)
 			IWX_WRITE_1(sc, IWX_CSR_INT_PERIODIC_REG,
 			    IWX_CSR_INT_PERIODIC_ENA);
 
-		iwx_notif_intr(sc);
+		softint_schedule(sc->sc_soft_ih);
 	}
 
 	rv = 1;
@@ -11070,7 +11079,7 @@ iwx_intr_msix(void *arg)
 
 	if (inta_fh & IWX_MSIX_FH_INT_CAUSES_Q0 ||
 	    inta_fh & IWX_MSIX_FH_INT_CAUSES_Q1) {
-		iwx_notif_intr(sc);
+		softint_schedule(sc->sc_soft_ih);
 	}
 
 	/* firmware chunk loaded */
@@ -11138,7 +11147,6 @@ iwx_intr_msix(void *arg)
 	return 1;
 }
 
-typedef void *iwx_match_t;
 
 static const struct pci_matchid iwx_devices[] = {
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_WL_22500_1 },
@@ -11163,7 +11171,7 @@ static const struct pci_matchid iwx_devices[] = {
 
 
 int
-iwx_match(struct device *parent, iwx_match_t match __unused, void *aux)
+iwx_match(device_t parent, cfdata_t match, void *aux)
 {
 	struct pci_attach_args *pa = aux;
 	pcireg_t memtype;
@@ -11185,7 +11193,7 @@ iwx_match(struct device *parent, iwx_match_t match __unused, void *aux)
 
 	memtype = pci_mapreg_type(pa->pa_pc, pa->pa_tag, PCI_MAPREG_START);
 	if (pci_mapreg_map(pa, PCI_MAPREG_START, memtype, 0,
-	    &st, &sh, NULL, &sz, 0)) {
+	    &st, &sh, NULL, &sz)) {
 		printf("%s: can't map mem space\n", __func__);
 		return 0;
 	}
@@ -11657,9 +11665,9 @@ iwx_preinit(struct iwx_softc *sc)
 }
 
 void
-iwx_attach_hook(struct device *self)
+iwx_attach_hook(device_t self)
 {
-	struct iwx_softc *sc = (void *)self;
+	struct iwx_softc *sc = device_private(self);
 
 	KASSERT(!cold);
 
@@ -11783,26 +11791,34 @@ iwx_get_crf_id(struct iwx_softc *sc)
 }
 
 void
-iwx_attach(struct device *parent, struct device *self, void *aux)
+iwx_attach(device_t parent, device_t self, void *aux)
 {
-	struct iwx_softc *sc = (void *)self;
+	struct iwx_softc *sc = device_private(self);
 	struct pci_attach_args *pa = aux;
-	pci_intr_handle_t ih;
 	pcireg_t reg, memtype;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ifnet *ifp = ic->ic_ifp;
 	const char *intrstr;
+	char intrbuf[PCI_INTRSTR_LEN];
 	const struct iwx_device_cfg *cfg;
 	int err;
 	int txq_i, i, j;
 	size_t ctxt_info_size;
 
+	sc->sc_dev = self;
 	sc->sc_pid = PCI_PRODUCT(pa->pa_id);
 	sc->sc_pct = pa->pa_pc;
 	sc->sc_pcitag = pa->pa_tag;
 	sc->sc_dmat = pa->pa_dmat;
 
 	rw_init(&sc->ioctl_rwl);
+
+	/* RX frames are processed in a softint, outside the interrupt. */
+	sc->sc_soft_ih = softint_establish(SOFTINT_NET, iwx_softintr, sc);
+	if (sc->sc_soft_ih == NULL) {
+		aprint_error_dev(self, "could not establish softint\n");
+		return;
+	}
 
 	err = pci_get_capability(sc->sc_pct, sc->sc_pcitag,
 	    PCI_CAP_PCIEXPRESS, &sc->sc_cap_off, NULL);
@@ -11821,45 +11837,40 @@ iwx_attach(struct device *parent, struct device *self, void *aux)
 
 	memtype = pci_mapreg_type(pa->pa_pc, pa->pa_tag, PCI_MAPREG_START);
 	err = pci_mapreg_map(pa, PCI_MAPREG_START, memtype, 0,
-	    &sc->sc_st, &sc->sc_sh, NULL, &sc->sc_sz, 0);
+	    &sc->sc_st, &sc->sc_sh, NULL, &sc->sc_sz);
 	if (err) {
 		printf("%s: can't map mem space\n", DEVNAME(sc));
 		return;
 	}
 
-	if (pci_intr_map_msix(pa, 0, &ih) == 0) {
-		sc->sc_msix = 1;
-	} else if (pci_intr_map_msi(pa, &ih)) {
-		if (pci_intr_map(pa, &ih)) {
-			printf("%s: can't map interrupt\n", DEVNAME(sc));
-			return;
-		}
-		/* Hardware bug workaround. */
-		reg = pci_conf_read(sc->sc_pct, sc->sc_pcitag,
-		    PCI_COMMAND_STATUS_REG);
-		if (reg & PCI_COMMAND_INTERRUPT_DISABLE)
-			reg &= ~PCI_COMMAND_INTERRUPT_DISABLE;
-		pci_conf_write(sc->sc_pct, sc->sc_pcitag,
-		    PCI_COMMAND_STATUS_REG, reg);
-	}
-
-	intrstr = pci_intr_string(sc->sc_pct, ih);
-	if (sc->sc_msix)
-		sc->sc_ih = pci_intr_establish(sc->sc_pct, ih, IPL_NET,
-		    iwx_intr_msix, sc, DEVNAME(sc));
-	else
-		sc->sc_ih = pci_intr_establish(sc->sc_pct, ih, IPL_NET,
-		    iwx_intr, sc, DEVNAME(sc));
-
-	if (sc->sc_ih == NULL) {
-		printf("\n");
-		printf("%s: can't establish interrupt", DEVNAME(sc));
-		if (intrstr != NULL)
-			printf(" at %s", intrstr);
-		printf("\n");
+	err = pci_intr_alloc(pa, &sc->sc_pihp, NULL, 0);
+	if (err) {
+		printf("%s: can't allocate interrupt
+", DEVNAME(sc));
 		return;
 	}
-	printf(", %s\n", intrstr);
+	/* INTx needs the interrupt-disable bit clear; MSI needs it set. */
+	reg = pci_conf_read(sc->sc_pct, sc->sc_pcitag, PCI_COMMAND_STATUS_REG);
+	if (pci_intr_type(sc->sc_pct, sc->sc_pihp[0]) == PCI_INTR_TYPE_INTX)
+		reg &= ~PCI_COMMAND_INTERRUPT_DISABLE;
+	else
+		reg |= PCI_COMMAND_INTERRUPT_DISABLE;
+	pci_conf_write(sc->sc_pct, sc->sc_pcitag, PCI_COMMAND_STATUS_REG, reg);
+
+	intrstr = pci_intr_string(sc->sc_pct, sc->sc_pihp[0], intrbuf,
+	    sizeof(intrbuf));
+	sc->sc_ih = pci_intr_establish_xname(sc->sc_pct, sc->sc_pihp[0],
+	    IPL_NET, iwx_intr, sc, device_xname(self));
+	if (sc->sc_ih == NULL) {
+		aprint_error_dev(self, "can't establish interrupt");
+		if (intrstr != NULL)
+			aprint_error(" at %s", intrstr);
+		aprint_error("
+");
+		return;
+	}
+	aprint_normal_dev(self, "interrupting at %s
+", intrstr);
 
 	/* Clear pending interrupts. */
 	IWX_WRITE(sc, IWX_CSR_INT_MASK, 0);
@@ -12336,9 +12347,9 @@ iwx_wakeup(struct iwx_softc *sc)
 }
 
 int
-iwx_activate(struct device *self, int act)
+iwx_activate(device_t self, enum devact act)
 {
-	struct iwx_softc *sc = (struct iwx_softc *)self;
+	struct iwx_softc *sc = device_private(self);
 	struct ifnet *ifp = sc->sc_ic.ic_ifp;
 	int err = 0;
 
@@ -12366,11 +12377,5 @@ iwx_activate(struct device *self, int act)
 	return 0;
 }
 
-struct cfdriver iwx_cd = {
-	NULL, "iwx", DV_IFNET
-};
-
-const struct cfattach iwx_ca = {
-	sizeof(struct iwx_softc), iwx_match, iwx_attach,
-	NULL, iwx_activate
-};
+CFATTACH_DECL_NEW(iwx, sizeof(struct iwx_softc), iwx_match, iwx_attach,
+    NULL, iwx_activate);

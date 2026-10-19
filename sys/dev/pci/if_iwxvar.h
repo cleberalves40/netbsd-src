@@ -628,7 +628,9 @@ const struct iwx_device_cfg iwx_cfg_ma_a0_fm_a0 = {
 #define IWX_SUBDEVICE_CORES(subdevice)	((uint16_t)((subdevice) & 0x1c00) >> 10)
 
 struct iwx_softc {
-	struct device sc_dev;
+	device_t		sc_dev;
+	pci_intr_handle_t	*sc_pihp;
+	void			*sc_soft_ih;
 	struct ieee80211com sc_ic;
 	int (*sc_newstate)(struct ieee80211com *, enum ieee80211_state, int);
 	int sc_newstate_pending;
