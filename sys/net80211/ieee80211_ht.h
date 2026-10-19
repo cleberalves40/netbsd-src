@@ -39,6 +39,15 @@
 #define IEEE80211_ELEMID_VHTCAPS	191	/* 11ac */
 #define IEEE80211_ELEMID_VHTOP		192	/* 11ac */
 
+/* Traffic identifiers (TIDs) for block ack, 802.11-2012 8.4.2.30 */
+#define IEEE80211_NUM_TID		16
+
+/* Block ack agreement states */
+#define IEEE80211_BA_INIT		0
+#define IEEE80211_BA_REQUESTED		1
+#define IEEE80211_BA_AGREED		2
+#define IEEE80211_BA_MAX_WINSZ		64	/* max ADDBA BUFSZ */
+
 #define IEEE80211_ELEMID_EXT_HECAPS		35	/* 11ax HE Capabilities */
 #define IEEE80211_ELEMID_EXT_HEOP		36	/* 11ax HE Operation */
 #define	IEEE80211_HT_NUM_MCS			77

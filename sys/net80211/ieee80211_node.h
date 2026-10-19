@@ -91,6 +91,40 @@ struct ieee80211com;
  * state.  This is done by overriding the ic_node_* methods in
  * the ieee80211com structure.
  */
+/*
+ * Block ack (A-MPDU) state.  Adapted from OpenBSD for NetBSD: the
+ * per-agreement timeouts are plain tick counters decremented by the
+ * node table's periodic timer, so no callout is needed per TID.
+ */
+struct ieee80211_tx_ba {
+	struct ieee80211_node	*ba_ni;	/* backpointer for callbacks */
+	int			ba_timeout_val;	/* ticks until the agreement expires */
+	int			ba_state;
+	u_int16_t		ba_params;	/* ADDBA parameter set field */
+	u_int16_t		ba_winstart;	/* 802.11 sequence numbers */
+	u_int16_t		ba_winend;
+	u_int16_t		ba_winsize;
+	u_int8_t		ba_token;
+	uint64_t		ba_bitmap;	/* ACKed frames in the current window */
+};
+
+struct ieee80211_rx_ba {
+	struct ieee80211_node	*ba_ni;	/* backpointer for callbacks */
+	struct {
+		struct mbuf	*m;
+		int		rssi;		/* replaces ieee80211_rxinfo */
+		u_int32_t	rstamp;
+	}			*ba_buf;
+	int			ba_timeout_val;
+	int			ba_state;
+	u_int16_t		ba_params;
+	u_int16_t		ba_winstart;
+	u_int16_t		ba_winend;
+	u_int16_t		ba_winsize;
+	u_int16_t		ba_head;
+	int			ba_gapwait;	/* frames held behind a gap */
+};
+
 struct ieee80211_node {
 	struct ieee80211com	*ni_ic;
 	struct ieee80211_node_table *ni_table;
@@ -196,6 +230,12 @@ struct ieee80211_node {
 	/* HE operation */
 	uint8_t			ni_he_oper_params[IEEE80211_HEOP_PARAMS_LEN];
 	uint16_t		ni_he_basic_mcs;
+
+	/* Block ack: per-TID agreement state */
+	int			ni_addba_req_intval[IEEE80211_NUM_TID];
+	int			ni_addba_req_timer[IEEE80211_NUM_TID];
+	struct ieee80211_tx_ba	ni_tx_ba[IEEE80211_NUM_TID];
+	struct ieee80211_rx_ba	ni_rx_ba[IEEE80211_NUM_TID];
 
 	/* spatial stream counts used by rate control */
 	int			ni_txmcs;	/* current MCS used for TX */
