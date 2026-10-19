@@ -834,6 +834,10 @@ ieee80211_watchdog(struct ieee80211com *ic)
 				nt->nt_timeout(nt);
 			need_inact_timer += nt->nt_inact_timer;
 		}
+
+		/* block ack countdowns, one second per tick */
+		if (ieee80211_ba_tick(ic))
+			need_inact_timer++;
 	}
 	if (ic->ic_mgt_timer != 0 || need_inact_timer)
 		ic->ic_ifp->if_timer = 1;

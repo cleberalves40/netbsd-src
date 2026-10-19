@@ -106,6 +106,7 @@ struct ieee80211_tx_ba {
 	u_int16_t		ba_winsize;
 	u_int8_t		ba_token;
 	uint64_t		ba_bitmap;	/* ACKed frames in the current window */
+	int			ba_ticks_left;	/* seconds to inactivity timeout, 0 = off */
 };
 
 struct ieee80211_rx_ba {
@@ -123,6 +124,7 @@ struct ieee80211_rx_ba {
 	u_int16_t		ba_winsize;
 	u_int16_t		ba_head;
 	int			ba_gapwait;	/* frames held behind a gap */
+	int			ba_ticks_left;	/* seconds to inactivity timeout, 0 = off */
 };
 
 struct ieee80211_node {
@@ -236,6 +238,7 @@ struct ieee80211_node {
 	int			ni_addba_req_timer[IEEE80211_NUM_TID];
 	struct ieee80211_tx_ba	ni_tx_ba[IEEE80211_NUM_TID];
 	struct ieee80211_rx_ba	ni_rx_ba[IEEE80211_NUM_TID];
+	u_int			ni_ba_gen;	/* block ack walk generation */
 
 	/* spatial stream counts used by rate control */
 	int			ni_txmcs;	/* current MCS used for TX */

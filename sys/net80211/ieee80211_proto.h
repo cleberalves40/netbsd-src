@@ -273,4 +273,16 @@ void	ieee80211_notify_scan_done(struct ieee80211com *);
 int	ieee80211_send_action(struct ieee80211com *, struct ieee80211_node *,
 	    int, int, int);
 
+/* Block ack, transmit side (ieee80211_proto.c) */
+int	ieee80211_addba_request(struct ieee80211com *, struct ieee80211_node *,
+	    u_int16_t, u_int8_t);
+void	ieee80211_addba_resp_accept(struct ieee80211com *,
+	    struct ieee80211_node *, uint8_t);
+void	ieee80211_addba_resp_refuse(struct ieee80211com *,
+	    struct ieee80211_node *, uint8_t, uint16_t);
+void	ieee80211_delba_request(struct ieee80211com *, struct ieee80211_node *,
+	    u_int16_t, u_int8_t, u_int8_t);
+void	ieee80211_node_tx_ba_clear(struct ieee80211_node *, int);
+int	ieee80211_ba_tick(struct ieee80211com *);
+
 #endif /* !_NET80211_IEEE80211_PROTO_H_ */

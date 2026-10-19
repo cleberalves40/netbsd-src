@@ -72,6 +72,9 @@
 #define IEEE80211_REASON_SETUP_REQUIRED	38
 #define IEEE80211_REASON_TIMEOUT		39
 
+/* Driver offloads ADDBA; not a standard bit, kept in ic_caps. */
+#define IEEE80211_C_ADDBA_OFFLOAD	0x80000000
+
 /* Seconds to wait for an ADDBA response, and the back-off cap */
 #define IEEE80211_ADDBA_RESP_TIMEOUT	1
 #define IEEE80211_ADDBA_REQ_INTVAL_MAX	30

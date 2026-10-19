@@ -1156,3 +1156,243 @@ ieee80211_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg
 	}
 	return 0;
 }
+
+/*
+ * Block ack, transmit side: MLME-ADDBA and MLME-DELBA state machine
+ * (802.11-2012 10.24.x), ported from OpenBSD ieee80211_proto.c.
+ *
+ * OpenBSD arms a struct timeout per agreement.  NetBSD has no such
+ * per-TID timer, so the countdowns are kept in ticks: ieee80211_ba_tick()
+ * decrements them once a second from ieee80211_watchdog().  Timeouts
+ * are in seconds rather than the microseconds OpenBSD uses.
+ */
+
+/* Clear the transmit side of a block ack agreement for one TID. */
+void
+ieee80211_node_tx_ba_clear(struct ieee80211_node *ni, int tid)
+{
+	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+
+	if (ba->ba_state != IEEE80211_BA_INIT) {
+		ba->ba_ticks_left = 0;
+		ni->ni_addba_req_timer[tid] = 0;
+		ba->ba_state = IEEE80211_BA_INIT;
+	}
+}
+
+/* Make sure ieee80211_watchdog() keeps running while a timer is armed. */
+static void
+ieee80211_ba_arm(struct ieee80211com *ic)
+{
+	if (ic->ic_ifp != NULL)
+		ic->ic_ifp->if_timer = 1;
+}
+
+/* Request initiation of a block ack agreement with the peer. */
+int
+ieee80211_addba_request(struct ieee80211com *ic, struct ieee80211_node *ni,
+    u_int16_t ssn, u_int8_t tid)
+{
+	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+	int err;
+
+	if (ba->ba_state != IEEE80211_BA_INIT)
+		return EBUSY;
+
+	/* MLME-ADDBA.request */
+	ba->ba_ni = ni;
+	ba->ba_state = IEEE80211_BA_REQUESTED;
+	ba->ba_token = ic->ic_dialog_token++;
+	ba->ba_timeout_val = 0;
+	ba->ba_ticks_left = 0;
+	ba->ba_winsize = IEEE80211_BA_MAX_WINSZ;
+	ba->ba_winstart = ssn;
+	ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+	ba->ba_params =
+	    (ba->ba_winsize << IEEE80211_ADDBA_BUFSZ_SHIFT) |
+	    (tid << IEEE80211_ADDBA_TID_SHIFT);
+	ba->ba_params |= IEEE80211_ADDBA_AMSDU;
+	if ((ic->ic_htcaps & IEEE80211_HTCAP_DELAYEDBA) == 0)
+		/* immediate BA */
+		ba->ba_params |= IEEE80211_ADDBA_BA_POLICY;
+
+	if ((ic->ic_caps & IEEE80211_C_ADDBA_OFFLOAD) &&
+	    ic->ic_ampdu_tx_start != NULL) {
+		err = ic->ic_ampdu_tx_start(ic, ni, tid);
+		if (err && err != EBUSY) {
+			/* driver failed to set up, roll back */
+			ieee80211_addba_resp_refuse(ic, ni, tid,
+			    IEEE80211_STATUS_UNSPECIFIED);
+		} else if (err == 0)
+			ieee80211_addba_resp_accept(ic, ni, tid);
+		return err;	/* the device sends the ADDBA frame */
+	}
+
+	/* dot11ADDBAResponseTimeout, counted down by ieee80211_ba_tick() */
+	ni->ni_addba_req_timer[tid] = IEEE80211_ADDBA_RESP_TIMEOUT;
+	ieee80211_ba_arm(ic);
+	err = ieee80211_send_action(ic, ni, IEEE80211_CATEG_BA,
+	    IEEE80211_ACTION_ADDBA_REQ, tid);
+	if (err != 0) {
+		ni->ni_addba_req_timer[tid] = 0;
+		ba->ba_state = IEEE80211_BA_INIT;
+	}
+	return err;
+}
+
+/* MLME-ADDBA.confirm(Success) for the transmit side. */
+void
+ieee80211_addba_resp_accept(struct ieee80211com *ic,
+    struct ieee80211_node *ni, uint8_t tid)
+{
+	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+
+	ba->ba_state = IEEE80211_BA_AGREED;
+
+	/* Reset the ADDBA request interval and stop the response timer. */
+	ni->ni_addba_req_intval[tid] = 1;
+	ni->ni_addba_req_timer[tid] = 0;
+
+	ni->ni_txseqs[tid] = ba->ba_winstart;
+
+	/* Start the inactivity timer, rounded up to whole seconds. */
+	if (ba->ba_timeout_val != 0) {
+		ba->ba_ticks_left = (ba->ba_timeout_val + 999999) / 1000000;
+		ieee80211_ba_arm(ic);
+	}
+}
+
+/* MLME-ADDBA.confirm(Failure) for the transmit side. */
+void
+ieee80211_addba_resp_refuse(struct ieee80211com *ic,
+    struct ieee80211_node *ni, uint8_t tid, uint16_t status)
+{
+	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+
+	ni->ni_addba_req_timer[tid] = 0;
+	ba->ba_state = IEEE80211_BA_INIT;
+}
+
+/*
+ * Request the deletion of a block ack agreement with a peer and notify
+ * the driver.  dir != 0 tears down our transmit side; dir == 0 the
+ * receive side.
+ */
+void
+ieee80211_delba_request(struct ieee80211com *ic, struct ieee80211_node *ni,
+    u_int16_t reason, u_int8_t dir, u_int8_t tid)
+{
+	/* MLME-DELBA.request */
+	if (reason) {
+		/* transmit a DELBA frame */
+		(void)ieee80211_send_action(ic, ni, IEEE80211_CATEG_BA,
+		    IEEE80211_ACTION_DELBA, reason << 16 | dir << 8 | tid);
+	}
+	if (dir) {
+		/* MLME-DELBA.confirm(Originator) */
+		if (ic->ic_ampdu_tx_stop != NULL)
+			ic->ic_ampdu_tx_stop(ic, ni, tid);
+		ieee80211_node_tx_ba_clear(ni, tid);
+	} else {
+		/* MLME-DELBA.confirm(Recipient) */
+		struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+		int i;
+
+		if (ic->ic_ampdu_rx_stop != NULL)
+			ic->ic_ampdu_rx_stop(ic, ni, tid);
+
+		ba->ba_state = IEEE80211_BA_INIT;
+		ba->ba_ticks_left = 0;
+
+		if (ba->ba_buf != NULL) {
+			/* free all MSDUs held in the reordering buffer */
+			for (i = 0; i < IEEE80211_BA_MAX_WINSZ; i++)
+				if (ba->ba_buf[i].m != NULL)
+					m_freem(ba->ba_buf[i].m);
+			free(ba->ba_buf, M_DEVBUF);
+			ba->ba_buf = NULL;
+		}
+	}
+}
+
+/*
+ * Run the block ack countdowns for one node.  Sets *pending if any
+ * timer is still running.  Called with the node referenced and the
+ * node table unlocked, because it may send frames.
+ */
+static void
+ieee80211_ba_node_tick(struct ieee80211com *ic, struct ieee80211_node *ni,
+    int *pending)
+{
+	int tid;
+
+	for (tid = 0; tid < IEEE80211_NUM_TID; tid++) {
+		struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+
+		if (ni->ni_addba_req_timer[tid] > 0) {
+			if (--ni->ni_addba_req_timer[tid] == 0) {
+				/* MLME-ADDBA.confirm(TIMEOUT) */
+				ba->ba_state = IEEE80211_BA_INIT;
+				if (ni->ni_addba_req_intval[tid] <
+				    IEEE80211_ADDBA_REQ_INTVAL_MAX)
+					ni->ni_addba_req_intval[tid]++;
+				/*
+				 * The peer may believe an agreement already
+				 * exists, so try to delete it.
+				 */
+				(void)ieee80211_send_action(ic, ni,
+				    IEEE80211_CATEG_BA,
+				    IEEE80211_ACTION_DELBA,
+				    IEEE80211_REASON_SETUP_REQUIRED << 16 |
+				    1 << 8 | tid);
+			} else
+				*pending = 1;
+		}
+
+		if (ba->ba_ticks_left > 0) {
+			if (--ba->ba_ticks_left == 0) {
+				/* block ack inactivity timeout */
+				ieee80211_delba_request(ic, ni,
+				    IEEE80211_REASON_TIMEOUT, 1, tid);
+			} else
+				*pending = 1;
+		}
+	}
+}
+
+/*
+ * Advance every block ack timer by one second.  Called from
+ * ieee80211_watchdog().  Returns non-zero while any timer is still
+ * armed, so the caller keeps the watchdog running.
+ *
+ * Each node is visited once per walk.  Sending a frame needs the node
+ * table unlocked, so the walk restarts after each node, using a fresh
+ * generation to skip nodes already handled.
+ */
+int
+ieee80211_ba_tick(struct ieee80211com *ic)
+{
+	struct ieee80211_node_table *nt = &ic->ic_sta;
+	struct ieee80211_node *ni;
+	int pending = 0;
+	u_int gen;
+
+	gen = ++ic->ic_ba_gen;
+
+restart:
+	IEEE80211_NODE_LOCK(nt);
+	TAILQ_FOREACH(ni, &nt->nt_node, ni_list) {
+		if (ni->ni_ba_gen == gen)
+			continue;
+		ni->ni_ba_gen = gen;
+
+		ieee80211_ref_node(ni);
+		IEEE80211_NODE_UNLOCK(nt);
+		ieee80211_ba_node_tick(ic, ni, &pending);
+		ieee80211_free_node(ni);
+		goto restart;
+	}
+	IEEE80211_NODE_UNLOCK(nt);
+
+	return pending;
+}

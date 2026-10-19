@@ -256,6 +256,8 @@ struct ieee80211com {
 			    struct ieee80211_node *, u_int8_t);
 	void			(*ic_ampdu_rx_stop)(struct ieee80211com *,
 			    struct ieee80211_node *, u_int8_t);
+
+	u_int			ic_ba_gen;		/* node walk generation */
 };
 
 LIST_HEAD(ieee80211com_head, ieee80211com);
