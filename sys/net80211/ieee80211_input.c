@@ -378,6 +378,10 @@ out:
 	return -1;
 }
 
+/* HT/VHT capabilities of a peer (see the end of this file). */
+static void	ieee80211_input_htvht(struct ieee80211com *,
+	    struct ieee80211_node *, const u_int8_t *, const u_int8_t *);
+
 /* A-MPDU receive reordering (see the end of this file). */
 static int	ieee80211_input_ba(struct ieee80211com *, struct mbuf **,
 	    struct ieee80211_node *, int, u_int16_t, int, u_int32_t);
@@ -2189,6 +2193,12 @@ ieee80211_recv_mgmt_beacon(struct ieee80211com *ic, struct mbuf *m0,
 		case IEEE80211_ELEMID_XRATES:
 			scan.sp_xrates = frm;
 			break;
+		case IEEE80211_ELEMID_HTCAP:
+			scan.sp_htcaps = frm;
+			break;
+		case IEEE80211_ELEMID_VHTCAPS:
+			scan.sp_vhtcaps = frm;
+			break;
 		case IEEE80211_ELEMID_ERP:
 			if (frm[1] != 1) {
 				IEEE80211_DISCARD_IE(ic, IEEE80211_MSG_ELEMID,
@@ -2273,6 +2283,9 @@ ieee80211_recv_mgmt_beacon(struct ieee80211com *ic, struct mbuf *m0,
 		ni = ieee80211_refine_node_for_beacon(ic, ni,
 		    &ic->ic_channels[scan.sp_chan], scan.sp_ssid);
 	}
+
+	/* HT and VHT capabilities advertised by the BSS */
+	ieee80211_input_htvht(ic, ni, scan.sp_htcaps, scan.sp_vhtcaps);
 
 	/*
 	 * Count frame now that we know it's to be processed.
@@ -2812,6 +2825,7 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 	struct ieee80211_frame *wh;
 	u_int8_t *frm, *efrm;
 	u_int8_t *rates, *xrates, *wme;
+	u_int8_t *htcaps, *vhtcaps;
 	u_int8_t rate;
 	IEEE80211_DEBUGVAR(char ebuf[3 * ETHER_ADDR_LEN]);
 	u_int16_t capinfo, associd;
@@ -2856,6 +2870,7 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 	frm += 2;
 
 	rates = xrates = wme = NULL;
+	htcaps = vhtcaps = NULL;
 	while (frm + 1 < efrm) {
 		IEEE80211_VERIFY_LENGTH(efrm - frm, frm[1] + 2);
 
@@ -2866,6 +2881,12 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 		case IEEE80211_ELEMID_XRATES:
 			xrates = frm;
 			break;
+		case IEEE80211_ELEMID_HTCAP:
+			htcaps = frm;
+			break;
+		case IEEE80211_ELEMID_VHTCAPS:
+			vhtcaps = frm;
+			break;
 		case IEEE80211_ELEMID_VENDOR:
 			if (iswmeoui(frm))
 				wme = frm;
@@ -2875,6 +2896,8 @@ ieee80211_recv_mgmt_assoc_resp(struct ieee80211com *ic, struct mbuf *m0,
 
 		frm += frm[1] + 2;
 	}
+
+	ieee80211_input_htvht(ic, ni, htcaps, vhtcaps);
 
 	IEEE80211_VERIFY_ELEMENT(rates, IEEE80211_RATE_MAXSIZE);
 
@@ -3425,6 +3448,9 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, struct mbuf *m,
 		return;
 	if (m->m_len < sizeof(*wh) + 9)
 		return;
+	/* Block ack needs an HT peer, as in OpenBSD. */
+	if (!(ni->ni_flags & IEEE80211_NODE_HT))
+		return;
 
 	/* MLME-ADDBA.indication */
 	wh = mtod(m, const struct ieee80211_frame *);
@@ -3917,4 +3943,27 @@ ieee80211_node_rx_ba_clear(struct ieee80211_node *ni, int tid)
 	ba->ba_winmiss = 0;
 	ba->ba_missedsn = 0;
 	ba->ba_head = 0;
+}
+
+/*
+ * Apply the HT and VHT capabilities a peer advertised.  HT is used only
+ * when the driver advertises HT (ic_htcaps); VHT only on top of HT, on a
+ * 5 GHz channel.  A peer that does not advertise the element is cleared.
+ */
+static void
+ieee80211_input_htvht(struct ieee80211com *ic, struct ieee80211_node *ni,
+    const u_int8_t *htcaps, const u_int8_t *vhtcaps)
+{
+	if (htcaps != NULL && ic->ic_htcaps != 0 &&
+	    ieee80211_setup_htcaps(ni, htcaps + 2, htcaps[1]) == 0)
+		ni->ni_flags |= IEEE80211_NODE_HT;
+	else
+		ieee80211_clear_htcaps(ni);
+
+	if ((ni->ni_flags & IEEE80211_NODE_HT) && vhtcaps != NULL &&
+	    ic->ic_vhtcaps != 0 && IEEE80211_IS_CHAN_5GHZ(ni->ni_chan) &&
+	    ieee80211_setup_vhtcaps(ni, vhtcaps + 2, vhtcaps[1]) == 0)
+		ni->ni_flags |= IEEE80211_NODE_VHT;
+	else
+		ieee80211_clear_vhtcaps(ni);
 }
