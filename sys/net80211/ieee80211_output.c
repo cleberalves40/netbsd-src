@@ -157,6 +157,44 @@ ieee80211_send_setup(struct ieee80211com *ic,
 }
 
 /*
+ * Add an HT Capabilities element (802.11-2016 9.4.2.56).
+ */
+static u_int8_t *
+ieee80211_add_htcaps(u_int8_t *frm, struct ieee80211com *ic)
+{
+	*frm++ = IEEE80211_ELEMID_HTCAP;
+	*frm++ = 26;
+	le16enc(frm, ic->ic_htcaps); frm += 2;
+	*frm++ = ic->ic_ampdu_params;
+	memcpy(frm, ic->ic_sup_mcs, 10); frm += 10;
+	le16enc(frm, ic->ic_max_rxrate & IEEE80211_MCS_RX_RATE_HIGH); frm += 2;
+	*frm++ = ic->ic_tx_mcs_set;
+	*frm++ = 0;				/* reserved */
+	*frm++ = 0;				/* reserved */
+	*frm++ = 0;				/* reserved */
+	le16enc(frm, ic->ic_htxcaps); frm += 2;
+	le32enc(frm, ic->ic_txbfcaps); frm += 4;
+	*frm++ = ic->ic_aselcaps;
+	return frm;
+}
+
+/*
+ * Add a VHT Capabilities element (802.11ac 8.4.2.160).
+ */
+static u_int8_t *
+ieee80211_add_vhtcaps(u_int8_t *frm, struct ieee80211com *ic)
+{
+	*frm++ = IEEE80211_ELEMID_VHTCAPS;
+	*frm++ = 12;
+	le32enc(frm, ic->ic_vhtcaps); frm += 4;
+	le16enc(frm, ic->ic_vht_rxmcs); frm += 2;
+	le16enc(frm, ic->ic_vht_rx_max_lgi_mbit_s); frm += 2;
+	le16enc(frm, ic->ic_vht_txmcs); frm += 2;
+	le16enc(frm, ic->ic_vht_tx_max_lgi_mbit_s); frm += 2;
+	return frm;
+}
+
+/*
  * Send a management frame to the specified node.  The node pointer
  * must have a reference as the pointer will be passed to the driver
  * and potentially held for a long time.  If the frame is successfully
@@ -1650,6 +1688,8 @@ ieee80211_send_mgmt(struct ieee80211com *ic, struct ieee80211_node *ni,
 		 *	[tlv] ssid
 		 *	[tlv] supported rates
 		 *	[tlv] extended supported rates
+		 *	[tlv] HT capabilities
+		 *	[tlv] VHT capabilities
 		 *	[tlv] WME
 		 *	[tlv] user-specified ie's
 		 */
@@ -1661,6 +1701,8 @@ ieee80211_send_mgmt(struct ieee80211com *ic, struct ieee80211_node *ni,
 		       + 2 + IEEE80211_RATE_SIZE
 		       + 2 + (IEEE80211_RATE_MAXSIZE - IEEE80211_RATE_SIZE)
 		       + sizeof(struct ieee80211_wme_info)
+		       + (ic->ic_htcaps != 0 ? 2 + 26 : 0)
+		       + (ic->ic_vhtcaps != 0 ? 2 + 12 : 0)
 		       + (ic->ic_opt_ie != NULL ? ic->ic_opt_ie_len : 0)
 		);
 		if (m == NULL)
@@ -1697,6 +1739,11 @@ ieee80211_send_mgmt(struct ieee80211com *ic, struct ieee80211_node *ni,
 		frm = ieee80211_add_ssid(frm, ni->ni_essid, ni->ni_esslen);
 		frm = ieee80211_add_rates(frm, &ni->ni_rates);
 		frm = ieee80211_add_xrates(frm, &ni->ni_rates);
+		if (ic->ic_htcaps != 0)
+			frm = ieee80211_add_htcaps(frm, ic);
+		if (ic->ic_htcaps != 0 && ic->ic_vhtcaps != 0 &&
+		    IEEE80211_IS_CHAN_5GHZ(ni->ni_chan))
+			frm = ieee80211_add_vhtcaps(frm, ic);
 		if ((ic->ic_flags & IEEE80211_F_WME) && ni->ni_wme_ie != NULL)
 			frm = ieee80211_add_wme_info(frm, &ic->ic_wme);
 		if (ic->ic_opt_ie != NULL) {
