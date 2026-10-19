@@ -147,6 +147,7 @@ struct ieee80211_node {
 #define	IEEE80211_NODE_PWR_MGT	0x0010		/* power save mode enabled */
 #define	IEEE80211_NODE_AREF	0x0020		/* authentication ref held */
 #define	IEEE80211_NODE_HT	0x0040		/* HT peer: A-MPDU allowed */
+#define	IEEE80211_NODE_VHT	0x0080		/* VHT peer */
 	u_int16_t		ni_associd;	/* assoc response */
 	u_int16_t		ni_txpower;	/* current transmit power */
 	u_int16_t		ni_vlan;	/* vlan tag */
@@ -412,6 +413,8 @@ struct ieee80211_scanparams {
 	u_int8_t	*sp_xrates;
 	u_int8_t	*sp_wpa;
 	u_int8_t	*sp_wme;
+	u_int8_t	*sp_htcaps;	/* HT Capabilities element, if any */
+	u_int8_t	*sp_vhtcaps;	/* VHT Capabilities element, if any */
 };
 
 /*

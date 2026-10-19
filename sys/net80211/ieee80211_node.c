@@ -2574,3 +2574,78 @@ ieee80211_node_table_cleanup(struct ieee80211_node_table *nt)
 	IEEE80211_SCAN_LOCK_DESTROY(nt);
 	IEEE80211_NODE_LOCK_DESTROY(nt);
 }
+
+/*
+ * Parse the HT Capabilities element of a peer (802.11-2016 9.4.2.56).
+ * The caller sets NODE_HT on success.  Returns 0, or EINVAL for a
+ * malformed element.
+ */
+int
+ieee80211_setup_htcaps(struct ieee80211_node *ni, const u_int8_t *data,
+    u_int8_t len)
+{
+	if (len != 26)
+		return EINVAL;
+
+	ni->ni_htcaps = data[0] | (data[1] << 8);
+	ni->ni_ampdu_param = data[2];
+	memcpy(ni->ni_rxmcs, &data[3], sizeof(ni->ni_rxmcs));
+	/* bits 77-79 of the supported MCS set are reserved */
+	ni->ni_rxmcs[9] &= 0x1f;
+	ni->ni_max_rxrate = (data[13] | (data[14] << 8)) &
+	    IEEE80211_MCS_RX_RATE_HIGH;
+	ni->ni_tx_mcs_set = data[15];
+	ni->ni_htxcaps = data[19] | (data[20] << 8);
+	ni->ni_txbfcaps = data[21] | (data[22] << 8) |
+	    (data[23] << 16) | ((u_int32_t)data[24] << 24);
+	ni->ni_aselcaps = data[25];
+	return 0;
+}
+
+/* Forget the HT state of a peer that is not, or is no longer, HT. */
+void
+ieee80211_clear_htcaps(struct ieee80211_node *ni)
+{
+	ni->ni_htcaps = 0;
+	ni->ni_ampdu_param = 0;
+	memset(ni->ni_rxmcs, 0, sizeof(ni->ni_rxmcs));
+	ni->ni_max_rxrate = 0;
+	ni->ni_tx_mcs_set = 0;
+	ni->ni_htxcaps = 0;
+	ni->ni_txbfcaps = 0;
+	ni->ni_aselcaps = 0;
+	ni->ni_flags &= ~IEEE80211_NODE_HT;
+}
+
+/*
+ * Parse the VHT Capabilities element of a peer (802.11ac 8.4.2.160).
+ * The caller sets NODE_VHT on success.  Returns 0, or EINVAL.
+ */
+int
+ieee80211_setup_vhtcaps(struct ieee80211_node *ni, const u_int8_t *data,
+    u_int8_t len)
+{
+	if (len != 12)
+		return EINVAL;
+
+	ni->ni_vhtcaps = data[0] | (data[1] << 8) | (data[2] << 16) |
+	    ((u_int32_t)data[3] << 24);
+	ni->ni_vht_rxmcs = data[4] | (data[5] << 8);
+	ni->ni_vht_rx_max_lgi_mbit_s = (data[6] | (data[7] << 8)) &
+	    IEEE80211_VHT_MAX_LGI_MBIT_S_MASK;
+	ni->ni_vht_txmcs = data[8] | (data[9] << 8);
+	ni->ni_vht_tx_max_lgi_mbit_s = data[10] | (data[11] << 8);
+	return 0;
+}
+
+/* Forget the VHT state of a peer that is not, or is no longer, VHT. */
+void
+ieee80211_clear_vhtcaps(struct ieee80211_node *ni)
+{
+	ni->ni_vhtcaps = 0;
+	ni->ni_vht_rxmcs = 0;
+	ni->ni_vht_rx_max_lgi_mbit_s = 0;
+	ni->ni_vht_txmcs = 0;
+	ni->ni_vht_tx_max_lgi_mbit_s = 0;
+	ni->ni_flags &= ~IEEE80211_NODE_VHT;
+}
