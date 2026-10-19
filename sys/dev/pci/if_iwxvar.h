@@ -438,12 +438,6 @@ struct iwx_rxq_dup_data {
 	uint8_t last_sub_frame[IWX_MAX_TID_COUNT + 1];
 };
 
-struct iwx_setkey_task_arg {
-	int sta_id;
-	struct ieee80211_node *ni;
-	struct ieee80211_key *k;
-};
-
 struct iwx_ba_task_data {
 	uint32_t		start_tidmask;
 	uint32_t		stop_tidmask;
@@ -654,7 +648,6 @@ struct iwx_softc {
 	struct iwx_ba_task_data	ba_tx;
 
 	/* Task for setting encryption keys and its arguments. */
-	struct task		setkey_task;
 	/*
 	 * At present we need to process at most three keys at once:
 	 * Our pairwise key, a group key, and an integrity group key.
@@ -662,10 +655,6 @@ struct iwx_softc {
 	 * it might become a bottleneck for associations that occur at
 	 * roughly the same time.
 	 */
-	struct iwx_setkey_task_arg setkey_arg[3];
-	int setkey_cur;
-	int setkey_tail;
-	int setkey_nkeys;
 
 	/* Task for ERP/HT prot/slot-time/EDCA updates. */
 	struct task		mac_ctxt_task;

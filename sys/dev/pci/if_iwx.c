@@ -354,10 +354,6 @@ int	iwx_rxmq_get_signal_strength(struct iwx_softc *, struct iwx_rx_mpdu_desc *);
 void	iwx_rx_rx_phy_cmd(struct iwx_softc *, struct iwx_rx_packet *,
 	    struct iwx_rx_data *);
 int	iwx_get_noise(const struct iwx_statistics_rx_non_phy *);
-int	iwx_rx_hwdecrypt(struct iwx_softc *, struct mbuf *, uint32_t,
-	    struct ieee80211_rxinfo *);
-int	iwx_ccmp_decap(struct iwx_softc *, struct mbuf *,
-	    struct ieee80211_node *, struct ieee80211_rxinfo *);
 void	iwx_rx_frame(struct iwx_softc *, struct mbuf *, int, uint32_t, int, int,
 	    uint32_t, struct ieee80211_rxinfo *, struct mbuf_list *);
 void	iwx_clear_tx_desc(struct iwx_softc *, struct iwx_tx_ring *, int);
@@ -461,11 +457,6 @@ int	iwx_deauth(struct iwx_softc *);
 int	iwx_run(struct iwx_softc *);
 int	iwx_run_stop(struct iwx_softc *);
 struct ieee80211_node *iwx_node_alloc(struct ieee80211com *);
-int	iwx_set_key(struct ieee80211com *, struct ieee80211_node *,
-	    struct ieee80211_key *);
-void	iwx_setkey_task(void *);
-void	iwx_delete_key(struct ieee80211com *,
-	    struct ieee80211_node *, struct ieee80211_key *);
 int	iwx_media_change(struct ifnet *);
 void	iwx_newstate_task(void *);
 int	iwx_newstate(struct ieee80211com *, enum ieee80211_state, int);
@@ -480,7 +471,6 @@ int	iwx_send_temp_report_ths_cmd(struct iwx_softc *);
 int	iwx_init_hw(struct iwx_softc *);
 int	iwx_init(struct ifnet *);
 void	iwx_start(struct ifnet *);
-void	iwx_mfp_leave(struct iwx_softc *);
 void	iwx_stop(struct ifnet *);
 void	iwx_watchdog(struct ifnet *);
 int	iwx_ioctl(struct ifnet *, u_long, caddr_t);
@@ -4714,119 +4704,6 @@ iwx_get_noise(const struct iwx_statistics_rx_non_phy *stats)
 	return (nbant == 0) ? -127 : (total / nbant) - 107;
 }
 
-int
-iwx_ccmp_decap(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
-    struct ieee80211_rxinfo *rxi)
-{
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct ieee80211_key *k;
-	struct ieee80211_frame *wh;
-	uint64_t pn, *prsc;
-	uint8_t *ivp;
-	uint8_t tid;
-	int hdrlen, hasqos;
-
-	wh = mtod(m, struct ieee80211_frame *);
-	hdrlen = ieee80211_get_hdrlen(wh);
-	ivp = (uint8_t *)wh + hdrlen;
-
-	/* find key for decryption */
-	k = ieee80211_get_rxkey(ic, m, ni);
-	if (k == NULL || k->k_cipher != IEEE80211_CIPHER_CCMP)
-		return 1;
-
-	/* Check that ExtIV bit is be set. */
-	if (!(ivp[3] & IEEE80211_WEP_EXTIV))
-		return 1;
-
-	hasqos = ieee80211_has_qos(wh);
-	tid = hasqos ? ieee80211_get_qos(wh) & IEEE80211_QOS_TID : 0;
-	prsc = &k->k_rsc[tid];
-
-	/* Extract the 48-bit PN from the CCMP header. */
-	pn = (uint64_t)ivp[0]       |
-	     (uint64_t)ivp[1] <<  8 |
-	     (uint64_t)ivp[4] << 16 |
-	     (uint64_t)ivp[5] << 24 |
-	     (uint64_t)ivp[6] << 32 |
-	     (uint64_t)ivp[7] << 40;
-	if (rxi->rxi_flags & IEEE80211_RXI_HWDEC_SAME_PN) {
-		if (pn < *prsc) {
-			ic->ic_stats.is_ccmp_replays++;
-			return 1;
-		}
-	} else if (pn <= *prsc) {
-		ic->ic_stats.is_ccmp_replays++;
-		return 1;
-	}
-	/* Last seen packet number is updated in ieee80211_inputm(). */
-
-	/*
-	 * Some firmware versions strip the MIC, and some don't. It is not
-	 * clear which of the capability flags could tell us what to expect.
-	 * For now, keep things simple and just leave the MIC in place if
-	 * it is present.
-	 *
-	 * The IV will be stripped by ieee80211_inputm().
-	 */
-	return 0;
-}
-
-int
-iwx_rx_hwdecrypt(struct iwx_softc *sc, struct mbuf *m, uint32_t rx_pkt_status,
-    struct ieee80211_rxinfo *rxi)
-{
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = IC2IFP(ic);
-	struct ieee80211_frame *wh;
-	struct ieee80211_node *ni;
-	int ret = 0;
-	uint8_t type, subtype;
-
-	wh = mtod(m, struct ieee80211_frame *);
-
-	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
-	if (type == IEEE80211_FC0_TYPE_CTL)
-		return 0;
-
-	subtype = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
-	if (ieee80211_has_qos(wh) && (subtype & IEEE80211_FC0_SUBTYPE_NODATA))
-		return 0;
-
-	ni = ieee80211_find_rxnode(ic, wh);
-	/* Handle hardware decryption. */
-	if (((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_CTL)
-	    && (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
-	    (ni->ni_flags & IEEE80211_NODE_RXPROT) &&
-	    ((!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-	    ni->ni_rsncipher == IEEE80211_CIPHER_CCMP) ||
-	    (IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-	    ni->ni_rsngroupcipher == IEEE80211_CIPHER_CCMP))) {
-		if ((rx_pkt_status & IWX_RX_MPDU_RES_STATUS_SEC_ENC_MSK) !=
-		    IWX_RX_MPDU_RES_STATUS_SEC_CCM_ENC) {
-			ic->ic_stats.is_ccmp_dec_errs++;
-			ret = 1;
-			goto out;
-		}
-		/* Check whether decryption was successful or not. */
-		if ((rx_pkt_status &
-		    (IWX_RX_MPDU_RES_STATUS_DEC_DONE |
-		    IWX_RX_MPDU_RES_STATUS_MIC_OK)) !=
-		    (IWX_RX_MPDU_RES_STATUS_DEC_DONE |
-		    IWX_RX_MPDU_RES_STATUS_MIC_OK)) {
-			ic->ic_stats.is_ccmp_dec_errs++;
-			ret = 1;
-			goto out;
-		}
-		rxi->rxi_flags |= IEEE80211_RXI_HWDEC;
-	}
-out:
-	if (ret)
-		ifp->if_ierrors++;
-	ieee80211_release_node(ic, ni);
-	return ret;
-}
-
 void
 iwx_rx_frame(struct iwx_softc *sc, struct mbuf *m, int chanidx,
     uint32_t rx_pkt_status, int is_shortpre, int rate_n_flags,
@@ -4834,7 +4711,6 @@ iwx_rx_frame(struct iwx_softc *sc, struct mbuf *m, int chanidx,
     struct mbuf_list *ml)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = IC2IFP(ic);
 	struct ieee80211_frame *wh;
 	struct ieee80211_node *ni;
 
@@ -4843,13 +4719,6 @@ iwx_rx_frame(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 
 	wh = mtod(m, struct ieee80211_frame *);
 	ni = ieee80211_find_rxnode(ic, wh);
-	if ((rxi->rxi_flags & IEEE80211_RXI_HWDEC) &&
-	    iwx_ccmp_decap(sc, m, ni, rxi) != 0) {
-		ifp->if_ierrors++;
-		m_freem(m);
-		ieee80211_release_node(ic, ni);
-		return;
-	}
 
 #if NBPFILTER > 0
 	if (sc->sc_drvbpf != NULL) {
@@ -5313,16 +5182,6 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 		}
 	}
 
-	/*
-	 * Verify decryption before duplicate detection. The latter uses
-	 * the TID supplied in QoS frame headers and this TID is implicitly
-	 * verified as part of the CCMP nonce.
-	 */
-	if (iwx_rx_hwdecrypt(sc, m, le32toh(desc->status), &rxi)) {
-		m_freem(m);
-		return;
-	}
-
 	if (iwx_detect_duplicate(sc, m, desc, &rxi)) {
 		m_freem(m);
 		return;
@@ -5488,7 +5347,6 @@ iwx_rx_compressed_ba(struct iwx_softc *sc, struct iwx_rx_packet *pkt)
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_node *ni;
 	struct ieee80211_tx_ba *ba;
-	struct iwx_node *in;
 	struct iwx_tx_ring *ring;
 	uint16_t i, tfd_cnt, ra_tid_cnt, idx;
 	int qid;
@@ -6236,7 +6094,6 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	struct iwx_tfh_tfd *desc;
 	struct iwx_device_cmd *cmd;
 	struct ieee80211_frame *wh;
-	struct ieee80211_key *k = NULL;
 	const struct iwx_rate *rinfo;
 	uint64_t paddr;
 	u_int hdrlen;
@@ -6318,33 +6175,11 @@ iwx_tx(struct iwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	}
 #endif
 
-	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
-                k = ieee80211_get_txkey(ic, wh, ni);
-
-		/*
-		 * Firmware uses IGTK for Rx only while in station mode.
-		 * And because we do not have the IGTK installed for software
-		 * crypto calling into ieee80211_encrypt() with this key would
-		 * result in a kernel panic. Transmitting multicast management
-		 * frames is only useful in hostap mode which we do not support.
-		 */
-		if (k->k_flags & IEEE80211_KEY_IGTK) {
-			m_freem(m);
-			return ENOTSUP;
-		}
-
-		if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
-			if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
-				return ENOBUFS;
-			/* 802.11 header may have moved. */
-			wh = mtod(m, struct ieee80211_frame *);
-			flags |= IWX_TX_FLAGS_ENCRYPT_DIS;
-		} else {
-			k->k_tsc++;
-			/* Hardware increments PN internally and adds IV. */
-		}
-	} else
-		flags |= IWX_TX_FLAGS_ENCRYPT_DIS;
+	/*
+	 * net80211 encrypts protected frames in software (CCMP), so the
+	 * firmware must not encrypt them again.
+	 */
+	flags |= IWX_TX_FLAGS_ENCRYPT_DIS;
 
 	totlen = m->m_pkthdr.len;
 
@@ -8391,30 +8226,6 @@ iwx_bgscan_done_task(void *arg)
 	 * information about our next AP.
 	 */
 	if (ic->ic_flags & IEEE80211_F_RSNON) {
-		struct ieee80211_key *k;
-
-		if (ic->ic_bss->ni_flags & IEEE80211_NODE_MFP)
-			iwx_mfp_leave(sc);
-	
-		if (in->in_flags & IWX_NODE_FLAG_HAVE_PAIRWISE_KEY)
-			(*ic->ic_delete_key)(ic, ni, &ni->ni_pairwise_key);
-
-		if ((in->in_flags & IWX_NODE_FLAG_HAVE_GROUP_KEY) &&
-		    (ic->ic_def_txkey == 1 || ic->ic_def_txkey == 2)) {
-			k = &ic->ic_nw_keys[ic->ic_def_txkey];
-			if ((k->k_flags & IEEE80211_KEY_GROUP) &&
-			    k->k_cipher == IEEE80211_CIPHER_CCMP)
-				(*ic->ic_delete_key)(ic, ni, k);
-		}
-
-		if ((in->in_flags & IWX_NODE_FLAG_HAVE_INTEGRITY_GROUP_KEY) &&
-		    (ic->ic_igtk_kid == 4 || ic->ic_igtk_kid == 5)) {
-
-			k = &ic->ic_nw_keys[ic->ic_igtk_kid];
-			if (k->k_flags & IEEE80211_KEY_IGTK)
-				(*ic->ic_delete_key)(ic, ni, k);
-		}
-
 		ni->ni_port_valid = 0;
 		ni->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
 		ni->ni_flags &= ~IEEE80211_NODE_TXMGMTPROT;
@@ -9314,322 +9125,6 @@ iwx_node_alloc(struct ieee80211com *ic)
 }
 
 int
-iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
-    struct ieee80211_key *k)
-{
-	struct iwx_softc *sc = ic->ic_softc;
-	struct iwx_node *in = (void *)ni;
-	struct iwx_setkey_task_arg *a;
-	int err;
-
-	if (k->k_cipher != IEEE80211_CIPHER_CCMP &&
-	    (k->k_flags & IEEE80211_KEY_IGTK) == 0) {
-		/* Fallback to software crypto for other ciphers. */
-		err = ieee80211_set_key(ic, ni, k);
-		if (!err && in != NULL && (k->k_flags & IEEE80211_KEY_GROUP))
-			in->in_flags |= IWX_NODE_FLAG_HAVE_GROUP_KEY;
-		return err;
-	}
-
-	if (sc->setkey_nkeys >= nitems(sc->setkey_arg))
-		return ENOSPC;
-
-	a = &sc->setkey_arg[sc->setkey_cur];
-	a->sta_id = IWX_STATION_ID;
-	a->ni = ni;
-	a->k = k;
-	sc->setkey_cur = (sc->setkey_cur + 1) % nitems(sc->setkey_arg);
-	sc->setkey_nkeys++;
-	iwx_add_task(sc, systq, &sc->setkey_task);
-	return EBUSY;
-}
-
-int
-iwx_mld_set_sta_key_cmd(struct iwx_softc *sc, int sta_id,
-    struct ieee80211_node *ni, struct ieee80211_key *k,
-    int remove_key)
-{
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct iwx_sec_key_cmd cmd;
-	uint32_t flags = IWX_SEC_KEY_FLAG_CIPHER_CCMP;
-	int err;
-
-	if (k->k_flags & IEEE80211_KEY_GROUP)
-		flags |= IWX_SEC_KEY_FLAG_MCAST_KEY;
-	else if (k->k_flags & IEEE80211_KEY_IGTK)
-		flags |= IWX_SEC_KEY_FLAG_MCAST_KEY | IWX_SEC_KEY_FLAG_MFP;
-	else if (ni->ni_flags & IEEE80211_NODE_MFP)
-		flags |= IWX_SEC_KEY_FLAG_MFP;
-
-	memset(&cmd, 0, sizeof(cmd));
-	cmd.u.add.sta_mask = htole32(1 << sta_id);
-	cmd.u.add.key_id = htole32(k->k_id);
-	cmd.u.add.key_flags = htole32(flags);
-	cmd.u.add.tx_seq = htole64(k->k_tsc);
-	memcpy(cmd.u.add.key, k->k_key, k->k_len);
-	if (remove_key)
-		cmd.action = IWX_FW_CTXT_ACTION_REMOVE;
-	else
-		cmd.action = IWX_FW_CTXT_ACTION_ADD;
-
-	err = iwx_send_cmd_pdu(sc,
-	    IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_SEC_KEY_CMD),
-	    remove_key ? IWX_CMD_ASYNC : 0, sizeof(cmd), &cmd);
-	if (err) {
-		if (remove_key)
-			return err;
-
-		IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_DEAUTH,
-		    IEEE80211_REASON_AUTH_LEAVE);
-		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
-		return err;
-	}
-
-	if (!remove_key) {
-		if (k->k_flags & IEEE80211_KEY_GROUP)
-			ic->ic_def_txkey = k->k_id;
-		if (k->k_flags & IEEE80211_KEY_IGTK)
-			ic->ic_igtk_kid = k->k_id;
-	}
-
-	return 0;
-}
-
-int
-iwx_add_sta_key_cmd(struct iwx_softc *sc, int sta_id,
-    struct ieee80211_node *ni, struct ieee80211_key *k)
-{
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct iwx_add_sta_key_cmd cmd;
-	uint32_t status;
-	int err;
-
-	memset(&cmd, 0, sizeof(cmd));
-
-	cmd.common.key_flags = htole16(IWX_STA_KEY_FLG_CCM |
-	    IWX_STA_KEY_FLG_WEP_KEY_MAP |
-	    ((k->k_id << IWX_STA_KEY_FLG_KEYID_POS) &
-	    IWX_STA_KEY_FLG_KEYID_MSK));
-	if (k->k_flags & IEEE80211_KEY_GROUP) {
-		cmd.common.key_offset = 1;
-		cmd.common.key_flags |= htole16(IWX_STA_KEY_MULTICAST);
-	} else {
-		cmd.common.key_offset = 0;
-		if (ni->ni_flags & IEEE80211_NODE_MFP)
-			cmd.common.key_flags |= htole16(IWX_STA_KEY_MFP);
-	}
-
-	memcpy(cmd.common.key, k->k_key, MIN(sizeof(cmd.common.key), k->k_len));
-	cmd.common.sta_id = sta_id;
-
-	cmd.transmit_seq_cnt = htole64(k->k_tsc);
-
-	status = IWX_ADD_STA_SUCCESS;
-	err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA_KEY, sizeof(cmd), &cmd,
-	    &status);
-	if (sc->sc_flags & IWX_FLAG_SHUTDOWN)
-		return ECANCELED;
-	if (!err && (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS)
-		err = EIO;
-	if (err) {
-		IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_DEAUTH,
-		    IEEE80211_REASON_AUTH_LEAVE);
-		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
-		return err;
-	}
-
-	if (k->k_flags & IEEE80211_KEY_GROUP)
-		ic->ic_def_txkey = k->k_id;
-
-	return 0;
-}
-
-int
-iwx_set_sta_igtk(struct iwx_softc *sc, int sta_id, struct ieee80211_node *ni,
-    struct ieee80211_key *k, int remove_key)
-{
-	struct iwx_mgmt_mcast_key_cmd igtk_cmd = {};
-
-	/* Verify key details match the required command's expectations. */
-	if (k == &ni->ni_pairwise_key  ||
-	    (k->k_id != 4 && k->k_id != 5 &&
-	    k->k_id != 6 && k->k_id != 7) ||
-	    /* TODO: Other ciphers for WPA3? */
-	    k->k_cipher != IEEE80211_CIPHER_BIP)
-		return EINVAL;
-
-	if (!isset(sc->sc_enabled_capa,
-	    IWX_UCODE_TLV_CAPA_MULTI_QUEUE_RX_SUPPORT) &&
-	    k->k_cipher != IEEE80211_CIPHER_BIP)
-		return EINVAL;
-
-	igtk_cmd.key_id = htole32(k->k_id);
-	igtk_cmd.sta_id = htole32(sta_id);
-
-	if (remove_key) {
-		igtk_cmd.ctrl_flags |= htole32(IWX_STA_KEY_NOT_VALID);
-	} else {
-		switch (k->k_cipher) {
-		case IEEE80211_CIPHER_BIP:
-			igtk_cmd.ctrl_flags |= htole32(IWX_STA_KEY_FLG_CCM);
-			break;
-		/* TODO: Other ciphers for WPA3? */
-		default:
-			return EINVAL;
-		}
-
-		memcpy(igtk_cmd.igtk, k->k_key, k->k_len);
-		igtk_cmd.receive_seq_cnt = htole64(k->k_mgmt_rsc);
-	}
-
-	DPRINTF(("%s %sIGTK (%d) for sta %u\n",
-	    remove_key ? "removing" : "installing",
-	    k->k_id >= 6 ? "B" : "", k->k_id, sta_id));
-
-	if (!isset(sc->sc_enabled_capa,
-	    IWX_UCODE_TLV_CAPA_MULTI_QUEUE_RX_SUPPORT)) {
-		struct iwx_mgmt_mcast_key_cmd_v1 igtk_cmd_v1 = {
-			.ctrl_flags = igtk_cmd.ctrl_flags,
-			.key_id = igtk_cmd.key_id,
-			.sta_id = igtk_cmd.sta_id,
-			.receive_seq_cnt = igtk_cmd.receive_seq_cnt
-		};
-
-		memcpy(igtk_cmd_v1.igtk, igtk_cmd.igtk,
-		       sizeof(igtk_cmd_v1.igtk));
-		return iwx_send_cmd_pdu(sc, IWX_MGMT_MCAST_KEY,
-		    remove_key ? IWX_CMD_ASYNC : 0,
-		    sizeof(igtk_cmd_v1), &igtk_cmd_v1);
-	}
-
-	return iwx_send_cmd_pdu(sc, IWX_MGMT_MCAST_KEY,
-	    remove_key ? IWX_CMD_ASYNC : 0, sizeof(igtk_cmd), &igtk_cmd);
-}
-
-int
-iwx_add_sta_key(struct iwx_softc *sc, int sta_id, struct ieee80211_node *ni,
-    struct ieee80211_key *k)
-{
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct iwx_node *in = (void *)ni;
-	int want_keymask = (IWX_NODE_FLAG_HAVE_PAIRWISE_KEY |
-	    IWX_NODE_FLAG_HAVE_GROUP_KEY);
-	uint8_t sec_key_ver;
-	int err;
-
-	if (ni->ni_flags & IEEE80211_NODE_MFP)
-		want_keymask |= IWX_NODE_FLAG_HAVE_INTEGRITY_GROUP_KEY;
-
-	/*
-	 * Keys are stored in 'ni' so 'k' is valid if 'ni' is valid.
-	 * Currently we only implement station mode where 'ni' is always
-	 * ic->ic_bss so there is no need to validate arguments beyond this:
-	 */
-	KASSERT(ni == ic->ic_bss);
-
-	sec_key_ver = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP,
-	    IWX_SEC_KEY_CMD);
-	if (sec_key_ver != 0 && sec_key_ver != IWX_FW_CMD_VER_UNKNOWN)
-		err = iwx_mld_set_sta_key_cmd(sc, sta_id, ni, k, 0);
-	else if (k->k_flags & IEEE80211_KEY_IGTK)
-		err = iwx_set_sta_igtk(sc, sta_id, ni, k, 0);
-	else
-		err = iwx_add_sta_key_cmd(sc, sta_id, ni, k);
-	if (err)
-		return err;
-
-	if (k->k_flags & IEEE80211_KEY_IGTK) {
-		in->in_flags |= IWX_NODE_FLAG_HAVE_INTEGRITY_GROUP_KEY;
-		ic->ic_igtk_kid = k->k_id;
-	} else if (k->k_flags & IEEE80211_KEY_GROUP) {
-		in->in_flags |= IWX_NODE_FLAG_HAVE_GROUP_KEY;
-		ic->ic_def_txkey = k->k_id;
-	} else
-		in->in_flags |= IWX_NODE_FLAG_HAVE_PAIRWISE_KEY;
-
-	if ((in->in_flags & want_keymask) == want_keymask) {
-		DPRINTF(("marking port %s valid\n",
-		    ether_sprintf(ni->ni_macaddr)));
-		if (ni->ni_flags & IEEE80211_NODE_MFP)
-			ni->ni_flags |= IEEE80211_NODE_TXMGMTPROT;
-		ni->ni_port_valid = 1;
-		ieee80211_set_link_state(ic, LINK_STATE_UP);
-	}
-
-	return 0;
-}
-
-void
-iwx_setkey_task(void *arg)
-{
-	struct iwx_softc *sc = arg;
-	struct iwx_setkey_task_arg *a;
-	int err = 0, s = splnet();
-
-	while (sc->setkey_nkeys > 0) {
-		if (err || (sc->sc_flags & IWX_FLAG_SHUTDOWN))
-			break;
-		a = &sc->setkey_arg[sc->setkey_tail];
-		err = iwx_add_sta_key(sc, a->sta_id, a->ni, a->k);
-		a->sta_id = 0;
-		a->ni = NULL;
-		a->k = NULL;
-		sc->setkey_tail = (sc->setkey_tail + 1) %
-		    nitems(sc->setkey_arg);
-		sc->setkey_nkeys--;
-	}
-
-	refcnt_rele_wake(&sc->task_refs);
-	splx(s);
-}
-
-void
-iwx_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
-    struct ieee80211_key *k)
-{
-	struct iwx_softc *sc = ic->ic_softc;
-	struct iwx_add_sta_key_cmd cmd;
-	uint8_t sec_key_ver;
-
-	if (k->k_cipher != IEEE80211_CIPHER_CCMP &&
-	    (k->k_flags & IEEE80211_KEY_IGTK) == 0) {
-		/* Fallback to software crypto for other ciphers. */
-                ieee80211_delete_key(ic, ni, k);
-		return;
-	}
-
-	if ((sc->sc_flags & IWX_FLAG_STA_ACTIVE) == 0)
-		return;
-
-	sec_key_ver = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP,
-	    IWX_SEC_KEY_CMD);
-	if (sec_key_ver != 0 && sec_key_ver != IWX_FW_CMD_VER_UNKNOWN) {
-		iwx_mld_set_sta_key_cmd(sc, IWX_STATION_ID, ni, k, 1);
-		return;
-	}
-
-	if (k->k_flags & IEEE80211_KEY_IGTK) {
-		iwx_set_sta_igtk(sc, IWX_STATION_ID, ni, k, 1);
-		return;
-	}
-
-	memset(&cmd, 0, sizeof(cmd));
-
-	cmd.common.key_flags = htole16(IWX_STA_KEY_NOT_VALID |
-	    IWX_STA_KEY_FLG_NO_ENC | IWX_STA_KEY_FLG_WEP_KEY_MAP |
-	    ((k->k_id << IWX_STA_KEY_FLG_KEYID_POS) &
-	    IWX_STA_KEY_FLG_KEYID_MSK));
-	memcpy(cmd.common.key, k->k_key, MIN(sizeof(cmd.common.key), k->k_len));
-	if (k->k_flags & IEEE80211_KEY_GROUP)
-		cmd.common.key_offset = 1;
-	else
-		cmd.common.key_offset = 0;
-	cmd.common.sta_id = IWX_STATION_ID;
-
-	iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY, IWX_CMD_ASYNC, sizeof(cmd), &cmd);
-}
-
-int
 iwx_media_change(struct ifnet *ifp)
 {
 	int err;
@@ -9757,9 +9252,6 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 
 	if (ic->ic_state == IEEE80211_S_RUN) {
 		iwx_del_task(sc, systq, &sc->ba_task);
-		iwx_del_task(sc, systq, &sc->setkey_task);
-		memset(sc->setkey_arg, 0, sizeof(sc->setkey_arg));
-		sc->setkey_cur = sc->setkey_tail = sc->setkey_nkeys = 0;
 		iwx_del_task(sc, systq, &sc->mac_ctxt_task);
 		iwx_del_task(sc, systq, &sc->phy_ctxt_task);
 		iwx_del_task(sc, systq, &sc->bgscan_done_task);
@@ -10351,49 +9843,6 @@ iwx_start(struct ifnet *ifp)
 }
 
 void
-iwx_mfp_leave_done(struct ieee80211com *ic, struct ieee80211_node *ni)
-{
-	struct iwx_softc *sc = ic->ic_softc;
-	struct ifnet *ifp = IC2IFP(&sc->sc_ic);
-
-	if ((ifp->if_flags & IFF_RUNNING) &&
-	    ic->ic_state == IEEE80211_S_RUN &&
-	    (ni->ni_flags & IEEE80211_NODE_MFP)) {
-		sc->deauth_sent = 1;
-		wakeup(&sc->deauth_sent);
-	}
-}
-
-void
-iwx_mfp_leave(struct iwx_softc *sc)
-{
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct ieee80211_node *ni = (void *)ic->ic_bss;
-
-	ic->ic_xflags |= IEEE80211_F_TX_MGMT_ONLY;
-	sc->deauth_sent = 0;
-
-	ni->ni_unref_cb = iwx_mfp_leave_done;
-	ni->ni_unref_arg = NULL;
-	ni->ni_unref_arg_size = 0;
-
-	/*
-	 * Send an authenticated deauth frame in order to let our AP know we
-	 * are leaving. This allows our AP to tear down MFP state cleanly.
-	 * Otherwise we would remain locked out of this AP until a timeout
-	 * of stale MFP state occurs at the AP, which might take a while.
-	 */
-	if (IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_DEAUTH,
-	    IEEE80211_REASON_AUTH_LEAVE) != 0) {
-		ni->ni_unref_cb = NULL;
-		return;
-	}
-
-	if (tsleep_nsec(&sc->deauth_sent, 0, "iwxlv", MSEC_TO_NSEC(500)) != 0)
-		ni->ni_unref_cb = NULL;
-}
-
-void
 iwx_stop(struct ifnet *ifp)
 {
 	struct iwx_softc *sc = ifp->if_softc;
@@ -10409,19 +9858,11 @@ iwx_stop(struct ifnet *ifp)
 	task_del(systq, &sc->init_task);
 	iwx_del_task(sc, sc->sc_nswq, &sc->newstate_task);
 	iwx_del_task(sc, systq, &sc->ba_task);
-	iwx_del_task(sc, systq, &sc->setkey_task);
-	memset(sc->setkey_arg, 0, sizeof(sc->setkey_arg));
-	sc->setkey_cur = sc->setkey_tail = sc->setkey_nkeys = 0;
 	iwx_del_task(sc, systq, &sc->mac_ctxt_task);
 	iwx_del_task(sc, systq, &sc->phy_ctxt_task);
 	iwx_del_task(sc, systq, &sc->bgscan_done_task);
 	KASSERT(sc->task_refs.r_refs >= 1);
 	refcnt_finalize(&sc->task_refs, "iwxstop");
-
-	if (ic->ic_opmode == IEEE80211_M_STA &&
-	    ic->ic_state == IEEE80211_S_RUN &&
-	    (ic->ic_bss->ni_flags & IEEE80211_NODE_MFP))
-		iwx_mfp_leave(sc);
 
 	iwx_stop_device(sc);
 
@@ -12711,7 +12152,6 @@ iwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->init_task, iwx_init_task, sc);
 	task_set(&sc->newstate_task, iwx_newstate_task, sc);
 	task_set(&sc->ba_task, iwx_ba_task, sc);
-	task_set(&sc->setkey_task, iwx_setkey_task, sc);
 	task_set(&sc->mac_ctxt_task, iwx_mac_ctxt_task, sc);
 	task_set(&sc->phy_ctxt_task, iwx_phy_ctxt_task, sc);
 	task_set(&sc->bgscan_done_task, iwx_bgscan_done_task, sc);
@@ -12719,8 +12159,6 @@ iwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_node_alloc = iwx_node_alloc;
 	ic->ic_bgscan_start = iwx_bgscan;
 	ic->ic_bgscan_done = iwx_bgscan_done;
-	ic->ic_set_key = iwx_set_key;
-	ic->ic_delete_key = iwx_delete_key;
 
 	/* Override 802.11 state transition machine. */
 	sc->sc_newstate = ic->ic_newstate;
