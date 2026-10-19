@@ -19,4 +19,9 @@ FILES=	dist/iwx-Qu-b0-hr-b0-77.ucode dist/iwx-Qu-b0-jf-b0-77.ucode \
 
 FILESDIR=	${FIRMWAREDIR}/if_iwx
 
+# Nothing else creates libdata/firmware/if_iwx, so create it before the
+# first image is installed.
+beforeinstall:
+	${INSTALL_DIR} -o ${FIRMWAREOWN} -g ${FIRMWAREGRP} -m 755 ${DESTDIR}${FILESDIR}
+
 .include <bsd.files.mk>
