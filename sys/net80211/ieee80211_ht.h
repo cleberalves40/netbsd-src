@@ -48,6 +48,34 @@
 #define IEEE80211_BA_AGREED		2
 #define IEEE80211_BA_MAX_WINSZ		64	/* max ADDBA BUFSZ */
 
+/* Management frame subtype for action frames (absent from NetBSD) */
+#define IEEE80211_FC0_SUBTYPE_ACTION	0xd0
+#define IEEE80211_FC0_SUBTYPE_ACTION_NOACK	0xe0	/* 11n */
+
+/* Action frame categories and block ack actions (802.11-2012 8.5.x) */
+#define IEEE80211_CATEG_BA		3
+#define IEEE80211_ACTION_ADDBA_REQ	0
+#define IEEE80211_ACTION_ADDBA_RESP	1
+#define IEEE80211_ACTION_DELBA		2
+
+/* ADDBA parameter set and DELBA parameter fields */
+#define IEEE80211_ADDBA_AMSDU		0x0001	/* A-MSDU in A-MPDU supported */
+#define IEEE80211_ADDBA_BA_POLICY	0x0002	/* 1=immediate BA 0=delayed BA */
+#define IEEE80211_ADDBA_TID_MASK	0x003c
+#define IEEE80211_ADDBA_TID_SHIFT	2
+#define IEEE80211_ADDBA_BUFSZ_MASK	0xffc0
+#define IEEE80211_ADDBA_BUFSZ_SHIFT	6
+#define IEEE80211_DELBA_INITIATOR	0x0800
+#define IEEE80211_DELBA_TID_INFO_SHIFT	12
+
+/* Reason codes used by block ack; absent from the NetBSD enum */
+#define IEEE80211_REASON_SETUP_REQUIRED	38
+#define IEEE80211_REASON_TIMEOUT		39
+
+/* Seconds to wait for an ADDBA response, and the back-off cap */
+#define IEEE80211_ADDBA_RESP_TIMEOUT	1
+#define IEEE80211_ADDBA_REQ_INTVAL_MAX	30
+
 #define IEEE80211_ELEMID_EXT_HECAPS		35	/* 11ax HE Capabilities */
 #define IEEE80211_ELEMID_EXT_HEOP		36	/* 11ax HE Operation */
 #define	IEEE80211_HT_NUM_MCS			77

@@ -270,5 +270,7 @@ void	ieee80211_notify_node_join(struct ieee80211com *,
 void	ieee80211_notify_node_leave(struct ieee80211com *,
 		struct ieee80211_node *);
 void	ieee80211_notify_scan_done(struct ieee80211com *);
+int	ieee80211_send_action(struct ieee80211com *, struct ieee80211_node *,
+	    int, int, int);
 
 #endif /* !_NET80211_IEEE80211_PROTO_H_ */

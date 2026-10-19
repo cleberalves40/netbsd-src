@@ -1772,6 +1772,131 @@ bad:
 }
 
 /*
+ * Block ack action frame bodies (802.11-2012 8.5.x).  Each returns an
+ * mbuf holding the action payload, or NULL if no buffer is available.
+ */
+static struct mbuf *
+ieee80211_get_addba_req(struct ieee80211com *ic, struct ieee80211_node *ni,
+    u_int8_t tid)
+{
+	struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
+	struct mbuf *m;
+	u_int8_t *frm;
+
+	m = ieee80211_getmgtframe(&frm, 9);
+	if (m == NULL)
+		return NULL;
+
+	*frm++ = IEEE80211_CATEG_BA;
+	*frm++ = IEEE80211_ACTION_ADDBA_REQ;
+	*frm++ = ba->ba_token;
+	le16enc(frm, ba->ba_params); frm += 2;
+	le16enc(frm, ba->ba_timeout_val / IEEE80211_DUR_TU); frm += 2;
+	le16enc(frm, ba->ba_winstart << IEEE80211_SEQ_SEQ_SHIFT); frm += 2;
+
+	m->m_pkthdr.len = m->m_len = 9;
+	return m;
+}
+
+static struct mbuf *
+ieee80211_get_addba_resp(struct ieee80211com *ic, struct ieee80211_node *ni,
+    u_int8_t tid, u_int8_t token, u_int16_t status)
+{
+	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+	struct mbuf *m;
+	u_int8_t *frm;
+	u_int16_t params;
+
+	m = ieee80211_getmgtframe(&frm, 9);
+	if (m == NULL)
+		return NULL;
+
+	*frm++ = IEEE80211_CATEG_BA;
+	*frm++ = IEEE80211_ACTION_ADDBA_RESP;
+	*frm++ = token;
+	le16enc(frm, status); frm += 2;
+	if (status == 0)
+		params = ba->ba_params;
+	else
+		params = tid << IEEE80211_ADDBA_TID_SHIFT;
+	le16enc(frm, params); frm += 2;
+	le16enc(frm, status == 0 ? ba->ba_timeout_val / IEEE80211_DUR_TU : 0);
+	frm += 2;
+
+	m->m_pkthdr.len = m->m_len = 9;
+	return m;
+}
+
+static struct mbuf *
+ieee80211_get_delba(struct ieee80211com *ic, struct ieee80211_node *ni,
+    u_int8_t tid, u_int8_t dir, u_int16_t reason)
+{
+	struct mbuf *m;
+	u_int8_t *frm;
+	u_int16_t params;
+
+	m = ieee80211_getmgtframe(&frm, 6);
+	if (m == NULL)
+		return NULL;
+
+	*frm++ = IEEE80211_CATEG_BA;
+	*frm++ = IEEE80211_ACTION_DELBA;
+	params = tid << IEEE80211_DELBA_TID_INFO_SHIFT;
+	if (dir)
+		params |= IEEE80211_DELBA_INITIATOR;
+	le16enc(frm, params); frm += 2;
+	le16enc(frm, reason); frm += 2;
+
+	m->m_pkthdr.len = m->m_len = 6;
+	return m;
+}
+
+/*
+ * Send an action frame.  Internal to net80211: the public ic_send_mgmt
+ * hook keeps its one-argument signature, so block ack action frames go
+ * through here instead.  The reference protocol matches
+ * ieee80211_send_mgmt().  arg packs the action fields: the low byte is
+ * the TID, and the other fields are in the bytes above it.
+ */
+int
+ieee80211_send_action(struct ieee80211com *ic, struct ieee80211_node *ni,
+    int categ, int action, int arg)
+{
+	struct mbuf *m = NULL;
+	int ret;
+
+	ieee80211_ref_node(ni);
+
+	if (categ == IEEE80211_CATEG_BA) {
+		switch (action) {
+		case IEEE80211_ACTION_ADDBA_REQ:
+			m = ieee80211_get_addba_req(ic, ni, arg & 0xff);
+			break;
+		case IEEE80211_ACTION_ADDBA_RESP:
+			m = ieee80211_get_addba_resp(ic, ni, arg & 0xff,
+			    (arg >> 8) & 0xff, arg >> 16);
+			break;
+		case IEEE80211_ACTION_DELBA:
+			m = ieee80211_get_delba(ic, ni, arg & 0xff,
+			    (arg >> 8) & 0xff, arg >> 16);
+			break;
+		default:
+			break;
+		}
+	}
+	if (m == NULL) {
+		ic->ic_stats.is_tx_nobuf++;
+		ieee80211_free_node(ni);
+		return ENOMEM;
+	}
+
+	ret = ieee80211_mgmt_output(ic, ni, m, IEEE80211_FC0_SUBTYPE_ACTION, 0);
+	if (ret != 0)
+		ieee80211_free_node(ni);
+	return ret;
+}
+
+/*
  * Build a RTS (Request To Send) control frame.
  */
 struct mbuf *
