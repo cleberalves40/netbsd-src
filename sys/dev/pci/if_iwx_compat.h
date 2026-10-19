@@ -24,6 +24,11 @@
 #include <sys/param.h>
 #include <machine/limits.h>
 #include <net/if.h>
+#include <net/if_ether.h>
+#include <sys/endian.h>
+#include <sys/stdint.h>
+#include <dev/firmload.h>
+#include <dev/pci/pcivar.h>
 
 /*
  * timeout(9) on top of callout(9).  Times are in ticks of the given
@@ -262,6 +267,140 @@ mallocarray(size_t n, size_t size, struct malloc_type *type, int flags)
 	if (n != 0 && size > SIZE_MAX / n)
 		return NULL;
 	return malloc(n * size, type, flags);
+}
+
+/* ------------------------------------------------------------------
+ * Kernel primitives with different names or semantics on NetBSD.
+ * ------------------------------------------------------------------ */
+
+/* nitems(9) and the OpenBSD byte-order names. */
+#define nitems(a)		(sizeof(a) / sizeof((a)[0]))
+#define letoh16(x)		le16toh(x)
+#define letoh32(x)		le32toh(x)
+#define letoh64(x)		le64toh(x)
+
+/*
+ * OpenBSD asserts the IPL at run time; NetBSD has no equivalent in
+ * this driver's paths, and the driver takes its locks at IPL_NET anyway.
+ */
+#define splassert(ipl)		((void)0)
+
+/*
+ * malloc(9) on NetBSD with M_WAITOK never returns NULL, so the
+ * OpenBSD "can fail" flag has no effect; the NULL checks stay valid.
+ */
+#define M_CANFAIL		0
+
+/*
+ * BUS_DMA_64BIT asks for a tag that can address above 4 GB.  On amd64
+ * the PCI DMA tags are already 64-bit capable, so no flag is needed.
+ */
+#define BUS_DMA_64BIT		0
+
+/* tsleep_nsec(9): nanosecond timeouts; INFSLP means no timeout. */
+#define INFSLP			(~(uint64_t)0)
+#define SEC_TO_NSEC(s)		((uint64_t)(s) * 1000000000ULL)
+
+static inline int
+tsleep_nsec(void *ident, int prio, const char *wmesg, uint64_t nsec)
+{
+	int ticks;
+
+	if (nsec == INFSLP)
+		ticks = 0;
+	else {
+		ticks = mstohz((nsec + 999999) / 1000000);
+		if (ticks == 0)
+			ticks = 1;
+	}
+	return tsleep(ident, prio, wmesg, ticks);
+}
+
+/* The all-zero link-layer address, as in OpenBSD's etheranyaddr. */
+static u_int8_t etheranyaddr[ETHER_ADDR_LEN];
+
+/*
+ * The OpenBSD system taskq.  It is created on first use and shared by
+ * the driver.  Racing first callers both create one; the loser frees
+ * its copy.
+ */
+static struct taskq *iwx_systq_tq;
+
+static inline struct taskq *
+iwx_get_systq(void)
+{
+	struct taskq *tq, *old;
+
+	tq = iwx_systq_tq;
+	if (tq != NULL)
+		return tq;
+	tq = taskq_create("iwxsys", 1, IPL_NONE, 0);
+	if (tq == NULL)
+		return NULL;
+	old = atomic_cas_ptr(&iwx_systq_tq, NULL, tq);
+	if (old != NULL) {
+		workqueue_destroy(tq->tq_wq);
+		kmem_free(tq, sizeof(*tq));
+		return old;
+	}
+	return tq;
+}
+
+#define systq			(iwx_get_systq())
+
+/* pci_matchbyid(9): match an attach against a vendor/product table. */
+struct pci_matchid {
+	u_int16_t	pm_vid;
+	u_int16_t	pm_pid;
+};
+
+static inline int
+pci_matchbyid(const struct pci_attach_args *pa,
+    const struct pci_matchid *tbl, int n)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+		if (PCI_VENDOR(pa->pa_id) == tbl[i].pm_vid &&
+		    PCI_PRODUCT(pa->pa_id) == tbl[i].pm_pid)
+			return 1;
+	return 0;
+}
+
+/*
+ * loadfirmware(9): read a named image into a fresh buffer.  The caller
+ * releases it with iwx_free(buf, M_DEVBUF, size).  Images come from the
+ * if_iwx firmware set, as the OpenBSD driver loads them.
+ */
+static inline int
+loadfirmware(const char *name, u_char **buf, size_t *size)
+{
+	firmware_handle_t fwh;
+	off_t fsize;
+	u_char *p;
+	int err;
+
+	*buf = NULL;
+	*size = 0;
+
+	err = firmware_open("if_iwx", name, &fwh);
+	if (err)
+		return err;
+	fsize = firmware_get_size(fwh);
+	if (fsize <= 0) {
+		firmware_close(fwh);
+		return EINVAL;
+	}
+	p = malloc(fsize, M_DEVBUF, M_WAITOK);
+	err = firmware_read(fwh, 0, p, fsize);
+	firmware_close(fwh);
+	if (err) {
+		iwx_free(p, M_DEVBUF, fsize);
+		return err;
+	}
+	*buf = p;
+	*size = fsize;
+	return 0;
 }
 
 #endif /* _DEV_PCI_IF_IWX_COMPAT_H_ */
