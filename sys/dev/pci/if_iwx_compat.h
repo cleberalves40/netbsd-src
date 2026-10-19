@@ -418,6 +418,18 @@ loadfirmware(const char *name, u_char **buf, size_t *size)
 /* NetBSD's malloc(9) macro discards the malloc type. */
 #define M_DEVBUF			((void *)0)
 
+/* The driver's softc contains the net80211 state as ic_sc; recover the
+ * softc from the ieee80211com pointer. NetBSD's ieee80211com has no
+ * ic_softc field, and the net80211 API is kept unchanged. */
+#define IC2SC(_ic)	((struct iwx_softc *)((char *)(_ic) - \
+			    __builtin_offsetof(struct iwx_softc, sc_ic)))
+
+/* OpenBSD's timeval conversion from microseconds. */
+#define USEC_TO_TIMEVAL(us, tv)	do {				\
+	(tv)->tv_sec = (us) / 1000000;				\
+	(tv)->tv_usec = (us) % 1000000;				\
+} while (0)
+
 /* Position of the most significant set bit, 0 for zero (as ffs()). */
 static inline int
 fls(unsigned int x)

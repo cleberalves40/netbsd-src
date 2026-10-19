@@ -3244,10 +3244,12 @@ iwx_init_channel_map(struct iwx_softc *sc, uint16_t *channel_profile_v3,
 int
 iwx_mimo_enabled(struct iwx_softc *sc)
 {
-	struct ieee80211com *ic = &sc->sc_ic;
-
-	return !sc->sc_nvm.sku_cap_mimo_disable &&
-	    (ic->ic_userflags & IEEE80211_F_NOMIMO) == 0;
+	/*
+	 * OpenBSD also honoured a per-interface IEEE80211_F_NOMIMO user
+	 * flag. NetBSD net80211 has no such flag; MIMO is disabled only by
+	 * the NVM SKU capability here.
+	 */
+	return !sc->sc_nvm.sku_cap_mimo_disable;
 }
 
 void
@@ -3392,7 +3394,7 @@ iwx_rx_bar_frame_release(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 	struct iwx_bar_frame_release *release = (void *)pkt->data;
 	struct iwx_reorder_buffer *buf;
 	struct iwx_rxba_data *rxba;
-	unsigned int baid, nssn, sta_id, tid;
+	unsigned int baid, nssn, tid;
 
 	if (iwx_rx_packet_payload_len(pkt) < sizeof(*release))
 		return;
@@ -3408,8 +3410,6 @@ iwx_rx_bar_frame_release(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 		return;
 
 	tid = le32toh(release->sta_tid) & IWX_BAR_FRAME_RELEASE_TID_MASK;
-	sta_id = (le32toh(release->sta_tid) &
-	    IWX_BAR_FRAME_RELEASE_STA_MASK) >> IWX_BAR_FRAME_RELEASE_STA_SHIFT;
 	if (tid != rxba->tid || rxba->sta_id != IWX_STATION_ID)
 		return;
 
@@ -3718,7 +3718,7 @@ iwx_phy_ctxt_task(void *arg)
 void
 iwx_updatechan(struct ieee80211com *ic)
 {
-	struct iwx_softc *sc = ic->ic_softc;
+	struct iwx_softc *sc = IC2SC(ic);
 
 	if (ic->ic_state == IEEE80211_S_RUN &&
 	    !task_pending(&sc->newstate_task))
@@ -3728,7 +3728,7 @@ iwx_updatechan(struct ieee80211com *ic)
 void
 iwx_updateprot(struct ieee80211com *ic)
 {
-	struct iwx_softc *sc = ic->ic_softc;
+	struct iwx_softc *sc = IC2SC(ic);
 
 	if (ic->ic_state == IEEE80211_S_RUN &&
 	    !task_pending(&sc->newstate_task))
@@ -3738,7 +3738,7 @@ iwx_updateprot(struct ieee80211com *ic)
 void
 iwx_updateslot(struct ieee80211com *ic)
 {
-	struct iwx_softc *sc = ic->ic_softc;
+	struct iwx_softc *sc = IC2SC(ic);
 
 	if (ic->ic_state == IEEE80211_S_RUN &&
 	    !task_pending(&sc->newstate_task))
@@ -3748,7 +3748,7 @@ iwx_updateslot(struct ieee80211com *ic)
 void
 iwx_updateedca(struct ieee80211com *ic)
 {
-	struct iwx_softc *sc = ic->ic_softc;
+	struct iwx_softc *sc = IC2SC(ic);
 
 	if (ic->ic_state == IEEE80211_S_RUN &&
 	    !task_pending(&sc->newstate_task))
@@ -3758,7 +3758,7 @@ iwx_updateedca(struct ieee80211com *ic)
 void
 iwx_updatedtim(struct ieee80211com *ic)
 {
-	struct iwx_softc *sc = ic->ic_softc;
+	struct iwx_softc *sc = IC2SC(ic);
 
 	if (ic->ic_state == IEEE80211_S_RUN &&
 	    !task_pending(&sc->newstate_task))
@@ -8207,7 +8207,7 @@ void
 iwx_bgscan_done(struct ieee80211com *ic,
     struct ieee80211_node_switch_bss_arg *arg, size_t arg_size)
 {
-	struct iwx_softc *sc = ic->ic_softc;
+	struct iwx_softc *sc = IC2SC(ic);
 
 	iwx_free(sc->bgscan_unref_arg, M_DEVBUF, sc->bgscan_unref_arg_size);
 	sc->bgscan_unref_arg = arg;
