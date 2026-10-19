@@ -8834,9 +8834,9 @@ iwx_cmd_version(uint32_t cmdid)
 }
 
 static inline uint32_t
-iwx_cmd_id(uint8_t opcode, uint8_t groupid, uint8_t version)
+iwx_cmd_id(uint8_t opcode, uint8_t groupid, uint8_t cmd_version)
 {
-	return opcode + (groupid << 8) + (version << 16);
+	return opcode + (groupid << 8) + (cmd_version << 16);
 }
 
 /* make uint16_t wide id out of uint8_t group and opcode */

@@ -296,6 +296,7 @@ mallocarray(size_t n, size_t size, struct malloc_type *type, int flags)
  * the PCI DMA tags are already 64-bit capable, so no flag is needed.
  */
 #define BUS_DMA_64BIT		0
+#define BUS_DMA_ZERO		0
 
 /* tsleep_nsec(9): nanosecond timeouts; INFSLP means no timeout. */
 #define INFSLP			(~(uint64_t)0)
@@ -401,6 +402,45 @@ loadfirmware(const char *name, u_char **buf, size_t *size)
 	*buf = p;
 	*size = fsize;
 	return 0;
+}
+
+/* Names the OpenBSD driver uses that NetBSD spells differently. */
+#define PCI_PCIE_LCSR			PCIE_LCSR
+#define PCI_PCIE_LCSR_ASPM_L0S		PCIE_LCSR_ASPM_L0S
+#define PCI_PCIE_DCSR2			PCIE_DCSR2
+#define PCI_PCIE_DCSR2_LTREN		PCIE_DCSR2_LTR_MEC
+#define EDCA_AC_BE			WME_AC_BE
+#define EDCA_AC_BK			WME_AC_BK
+#define EDCA_AC_VI			WME_AC_VI
+#define EDCA_AC_VO			WME_AC_VO
+#define EDCA_NUM_AC			WME_NUM_AC
+
+/* NetBSD's malloc(9) macro discards the malloc type. */
+#define M_DEVBUF			((void *)0)
+
+/* Position of the most significant set bit, 0 for zero (as ffs()). */
+static inline int
+fls(unsigned int x)
+{
+	int b = 0;
+
+	while (x != 0) {
+		x >>= 1;
+		b++;
+	}
+	return b;
+}
+
+static inline int
+flsl(unsigned long x)
+{
+	int b = 0;
+
+	while (x != 0) {
+		x >>= 1;
+		b++;
+	}
+	return b;
 }
 
 #endif /* _DEV_PCI_IF_IWX_COMPAT_H_ */

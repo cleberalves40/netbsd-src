@@ -473,7 +473,7 @@ int	iwx_init(struct ifnet *);
 void	iwx_start(struct ifnet *);
 void	iwx_stop(struct ifnet *);
 void	iwx_watchdog(struct ifnet *);
-int	iwx_ioctl(struct ifnet *, u_long, caddr_t);
+int	iwx_ioctl(struct ifnet *, u_long, void *);
 const char *iwx_desc_lookup(uint32_t);
 void	iwx_nic_error(struct iwx_softc *);
 void	iwx_dump_driver_status(struct iwx_softc *);
@@ -571,6 +571,10 @@ iwx_store_cscheme(struct iwx_softc *sc, uint8_t *data, size_t dlen)
 
 int
 iwx_ctxt_info_alloc_dma(struct iwx_softc *sc,
+    const struct iwx_fw_onesect *sec, struct iwx_dma_info *dram);
+
+int
+iwx_ctxt_info_alloc_dma(struct iwx_softc *sc,
     const struct iwx_fw_onesect *sec, struct iwx_dma_info *dram)
 {
 	int err = iwx_dma_contig_alloc(sc->sc_dmat, dram, sec->fws_len, 0);
@@ -602,6 +606,9 @@ iwx_ctxt_info_free_paging(struct iwx_softc *sc)
 	dram->paging_cnt = 0;
 	dram->paging = NULL;
 }
+
+int
+iwx_get_num_sections(const struct iwx_fw_sects *fws, int start);
 
 int
 iwx_get_num_sections(const struct iwx_fw_sects *fws, int start)
@@ -1854,7 +1861,7 @@ iwx_dma_contig_alloc(bus_dma_tag_t tag, struct iwx_dma_info *dma,
     bus_size_t size, bus_size_t alignment)
 {
 	int nsegs, err;
-	caddr_t va;
+	void * va;
 
 	dma->tag = tag;
 	dma->size = size;
@@ -1865,7 +1872,7 @@ iwx_dma_contig_alloc(bus_dma_tag_t tag, struct iwx_dma_info *dma,
 		goto fail;
 
 	err = bus_dmamem_alloc(tag, size, alignment, 0, &dma->seg, 1, &nsegs,
-	    BUS_DMA_NOWAIT | BUS_DMA_ZERO | BUS_DMA_64BIT);
+	    BUS_DMA_NOWAIT | BUS_DMA_64BIT);
 	if (err)
 		goto fail;
 
@@ -1878,6 +1885,8 @@ iwx_dma_contig_alloc(bus_dma_tag_t tag, struct iwx_dma_info *dma,
 	    BUS_DMA_NOWAIT | BUS_DMA_COHERENT);
 	if (err)
 		goto fail;
+	/* BUS_DMA_ZERO is not available on NetBSD; zero the buffer here. */
+	memset(va, 0, size);
 	dma->vaddr = va;
 
 	err = bus_dmamap_load(tag, dma->map, dma->vaddr, size, NULL,
@@ -2669,6 +2678,9 @@ iwx_clear_persistence_bit(struct iwx_softc *sc)
 }
 
 void
+iwx_sw_reset(struct iwx_softc *sc);
+
+void
 iwx_sw_reset(struct iwx_softc *sc)
 {
 	if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
@@ -3106,6 +3118,9 @@ iwx_unprotect_session(struct iwx_softc *sc, struct iwx_node *in)
  */
 
 uint8_t
+iwx_fw_valid_tx_ant(struct iwx_softc *sc);
+
+uint8_t
 iwx_fw_valid_tx_ant(struct iwx_softc *sc)
 {
 	uint8_t tx_ant;
@@ -3120,6 +3135,9 @@ iwx_fw_valid_tx_ant(struct iwx_softc *sc)
 }
 
 uint8_t
+iwx_fw_valid_rx_ant(struct iwx_softc *sc);
+
+uint8_t
 iwx_fw_valid_rx_ant(struct iwx_softc *sc)
 {
 	uint8_t rx_ant;
@@ -3132,6 +3150,9 @@ iwx_fw_valid_rx_ant(struct iwx_softc *sc)
 
 	return rx_ant;
 }
+
+int
+iwx_fw_num_ant(uint8_t ant);
 
 int
 iwx_fw_num_ant(uint8_t ant)
@@ -3400,6 +3421,9 @@ iwx_rx_bar_frame_release(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 #define IWX_MAX_RX_BA_SESSIONS 16
 
 struct iwx_rxba_data *
+iwx_find_rxba_data(struct iwx_softc *sc, uint8_t tid);
+
+struct iwx_rxba_data *
 iwx_find_rxba_data(struct iwx_softc *sc, uint8_t tid)
 {
 	int i;
@@ -3414,6 +3438,11 @@ iwx_find_rxba_data(struct iwx_softc *sc, uint8_t tid)
 
 	return NULL;
 }
+
+int
+iwx_sta_rx_agg_baid_cfg_cmd(struct iwx_softc *sc, struct ieee80211_node *ni,
+    uint8_t tid, uint16_t ssn, uint16_t winsize, int timeout_val, int start,
+    uint8_t *baid);
 
 int
 iwx_sta_rx_agg_baid_cfg_cmd(struct iwx_softc *sc, struct ieee80211_node *ni,
@@ -3465,6 +3494,11 @@ iwx_sta_rx_agg_baid_cfg_cmd(struct iwx_softc *sc, struct ieee80211_node *ni,
 
 	return 0;
 }
+
+int
+iwx_sta_rx_agg_sta_cmd(struct iwx_softc *sc, struct ieee80211_node *ni,
+    uint8_t tid, uint16_t ssn, uint16_t winsize, int timeout_val, int start,
+    uint8_t *baid);
 
 int
 iwx_sta_rx_agg_sta_cmd(struct iwx_softc *sc, struct ieee80211_node *ni,
@@ -4111,6 +4145,10 @@ iwx_start_fw(struct iwx_softc *sc)
 
 int
 iwx_pnvm_setup_fragmented(struct iwx_softc *sc, uint8_t **pnvm_data,
+    size_t *pnvm_size, int pnvm_segs);
+
+int
+iwx_pnvm_setup_fragmented(struct iwx_softc *sc, uint8_t **pnvm_data,
     size_t *pnvm_size, int pnvm_segs)
 {
 	struct iwx_pnvm_info_dram *pnvm_info;
@@ -4144,6 +4182,10 @@ fail:
 
 	return err;
 }
+
+int
+iwx_pnvm_setup(struct iwx_softc *sc, uint8_t **pnvm_data,
+    size_t *pnvm_size, int pnvm_segs);
 
 int
 iwx_pnvm_setup(struct iwx_softc *sc, uint8_t **pnvm_data,
@@ -5304,6 +5346,9 @@ iwx_clear_oactive(struct iwx_softc *sc, struct iwx_tx_ring *ring)
 		}
 	}
 }
+
+void
+iwx_rx_compressed_ba(struct iwx_softc *sc, struct iwx_rx_packet *pkt);
 
 void
 iwx_rx_compressed_ba(struct iwx_softc *sc, struct iwx_rx_packet *pkt)
@@ -6749,6 +6794,10 @@ iwx_add_sta_cmd(struct iwx_softc *sc, struct iwx_node *in, int update)
 
 void
 iwx_mld_modify_link_fill(struct iwx_softc *sc, struct iwx_node *in,
+    struct iwx_link_config_cmd *cmd, int changes, int active);
+
+void
+iwx_mld_modify_link_fill(struct iwx_softc *sc, struct iwx_node *in,
     struct iwx_link_config_cmd *cmd, int changes, int active)
 {
 #define IWX_EXP2(x)	((1 << (x)) - 1)	/* CWmin = 2^ECWmin - 1 */
@@ -7085,6 +7134,11 @@ iwx_mld_rm_sta_cmd(struct iwx_softc *sc, struct iwx_node *in)
 uint8_t
 iwx_umac_scan_fill_channels(struct iwx_softc *sc,
     struct iwx_scan_channel_cfg_umac *chan, size_t chan_nitems,
+    int n_ssids, uint32_t channel_cfg_flags);
+
+uint8_t
+iwx_umac_scan_fill_channels(struct iwx_softc *sc,
+    struct iwx_scan_channel_cfg_umac *chan, size_t chan_nitems,
     int n_ssids, uint32_t channel_cfg_flags)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
@@ -7124,6 +7178,11 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
 
 	return nchan;
 }
+
+uint8_t
+iwx_umac_scan_fill_channels_v5(struct iwx_softc *sc,
+    struct iwx_scan_channel_cfg_umac_v5 *chan, size_t chan_nitems,
+    int n_ssids, uint32_t channel_cfg_flags);
 
 uint8_t
 iwx_umac_scan_fill_channels_v5(struct iwx_softc *sc,
@@ -7378,6 +7437,10 @@ iwx_scan_umac_dwell_v10(struct iwx_softc *sc,
 	general_params->active_dwell[IWX_SCAN_HB_LMAC_IDX] = active_dwell;
 	general_params->passive_dwell[IWX_SCAN_HB_LMAC_IDX] = passive_dwell;
 }
+
+void
+iwx_scan_umac_dwell_v11(struct iwx_softc *sc,
+    struct iwx_scan_general_params_v11 *general_params, int bgscan);
 
 void
 iwx_scan_umac_dwell_v11(struct iwx_softc *sc,
@@ -7950,6 +8013,9 @@ iwx_mld_mac_ctxt_cmd(struct iwx_softc *sc, struct iwx_node *in,
 }
 
 int
+iwx_send_statistics_cmd_clear(struct iwx_softc *sc);
+
+int
 iwx_send_statistics_cmd_clear(struct iwx_softc *sc)
 {
 	struct iwx_statistics_cmd scmd = {
@@ -7971,6 +8037,9 @@ iwx_send_statistics_cmd_clear(struct iwx_softc *sc)
 	iwx_free_resp(sc, &cmd);
 	return 0;
 }
+
+int
+iwx_send_system_statistics_cmd_clear(struct iwx_softc *sc);
 
 int
 iwx_send_system_statistics_cmd_clear(struct iwx_softc *sc)
@@ -8008,19 +8077,19 @@ iwx_send_system_statistics_cmd_clear(struct iwx_softc *sc)
 int
 iwx_clear_statistics(struct iwx_softc *sc)
 {
-	uint32_t version;
+	uint32_t stats_version;
 
-	version = iwx_lookup_cmd_ver(sc, IWX_SYSTEM_GROUP,
+	stats_version = iwx_lookup_cmd_ver(sc, IWX_SYSTEM_GROUP,
 	    IWX_SYSTEM_STATISTICS_CMD);
 
-	switch (version) {
+	switch (stats_version) {
 	case IWX_FW_CMD_VER_UNKNOWN:
 		return iwx_send_statistics_cmd_clear(sc);
 	case 1:
 		return iwx_send_system_statistics_cmd_clear(sc);
 	default:
-		printf("%s: unknown statistics command version %d\n",
-		    DEVNAME(sc), version);
+		printf("%s: unknown statistics command stats_version %d\n",
+		    DEVNAME(sc), stats_version);
 		break;
 	}
 
@@ -8054,12 +8123,12 @@ int
 iwx_initiate_scan(struct iwx_softc *sc, int bgscan)
 {
 	int err;
-	uint8_t version;
+	uint8_t scan_version;
 
-	version = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC);
-	DPRINTF(("%s: scan command version %u\n", DEVNAME(sc), version));
+	scan_version = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC);
+	DPRINTF(("%s: scan command scan_version %u\n", DEVNAME(sc), scan_version));
 
-	switch (version) {
+	switch (scan_version) {
 	case 17:
 		err = iwx_umac_scan_v17(sc, bgscan);
 		break;
@@ -8579,6 +8648,9 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in)
 }
 
 void
+iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif);
+
+void
 iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
@@ -8628,14 +8700,14 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
 	}
 
 	if (rate_n_flags_ver2) {
-		const struct ieee80211_rateset *rs;
+		const struct ieee80211_rateset *rs_v2;
 		uint32_t ridx = (rate_n_flags & IWX_RATE_LEGACY_RATE_MSK);
 		if (rate_n_flags & IWX_RATE_MCS_LEGACY_OFDM_MSK)
-			rs = &ieee80211_std_rateset_11a;
+			rs_v2 = &ieee80211_std_rateset_11a;
 		else
-			rs = &ieee80211_std_rateset_11b;
-		if (ridx < rs->rs_nrates)
-			rval = (rs->rs_rates[ridx] & IEEE80211_RATE_VAL);
+			rs_v2 = &ieee80211_std_rateset_11b;
+		if (ridx < rs_v2->rs_nrates)
+			rval = (rs_v2->rs_rates[ridx] & IEEE80211_RATE_VAL);
 		else
 			rval = 0;
 	} else {
@@ -9914,7 +9986,7 @@ iwx_watchdog(struct ifnet *ifp)
 }
 
 int
-iwx_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
+iwx_ioctl(struct ifnet *ifp, u_long cmd, void * data)
 {
 	struct iwx_softc *sc = ifp->if_softc;
 	struct ieee80211com *ic = &sc->sc_ic;
@@ -10622,7 +10694,6 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
 
 		case IWX_PSM_UAPSD_AP_MISBEHAVING_NOTIFICATION: {
 			struct ieee80211com *ic = &sc->sc_ic;
-			struct ifnet *ifp = ic->ic_ifp;
 			struct ieee80211_node *ni = ic->ic_bss;
 			struct iwx_uapsd_misbehaving_ap_notif *notif;
 
@@ -11664,6 +11735,9 @@ iwx_find_device_cfg(struct iwx_softc *sc)
 
 	return NULL;
 }
+
+void
+iwx_get_crf_id(struct iwx_softc *sc);
 
 void
 iwx_get_crf_id(struct iwx_softc *sc)
