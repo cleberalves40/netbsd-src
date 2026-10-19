@@ -355,7 +355,7 @@ void	iwx_rx_rx_phy_cmd(struct iwx_softc *, struct iwx_rx_packet *,
 	    struct iwx_rx_data *);
 int	iwx_get_noise(const struct iwx_statistics_rx_non_phy *);
 void	iwx_rx_frame(struct iwx_softc *, struct mbuf *, int, uint32_t, int, int,
-	    uint32_t, struct ieee80211_rxinfo *, struct mbuf_list *);
+	    uint32_t, int, int);
 void	iwx_clear_tx_desc(struct iwx_softc *, struct iwx_tx_ring *, int);
 void	iwx_txd_done(struct iwx_softc *, struct iwx_tx_data *);
 void	iwx_txq_advance(struct iwx_softc *, struct iwx_tx_ring *, uint16_t);
@@ -479,15 +479,12 @@ void	iwx_nic_error(struct iwx_softc *);
 void	iwx_dump_driver_status(struct iwx_softc *);
 void	iwx_nic_umac_error(struct iwx_softc *);
 int	iwx_detect_duplicate(struct iwx_softc *, struct mbuf *,
-	    struct iwx_rx_mpdu_desc *, struct ieee80211_rxinfo *);
+	    struct iwx_rx_mpdu_desc *);
 void	iwx_release_frames(struct iwx_softc *, struct ieee80211_node *,
-	    struct iwx_rxba_data *, struct iwx_reorder_buffer *, uint16_t,
-	    struct mbuf_list *);
+	    struct iwx_rxba_data *, struct iwx_reorder_buffer *, uint16_t);
 int	iwx_rx_reorder(struct iwx_softc *, struct mbuf *, int,
-	    struct iwx_rx_mpdu_desc *, int, int, uint32_t,
-	    struct ieee80211_rxinfo *, struct mbuf_list *);
-void	iwx_rx_mpdu_mq(struct iwx_softc *, struct mbuf *, void *, size_t,
-	    struct mbuf_list *);
+	    struct iwx_rx_mpdu_desc *, int, int, uint32_t, int);
+void	iwx_rx_mpdu_mq(struct iwx_softc *, struct mbuf *, void *, size_t);
 int	iwx_rx_pkt_valid(struct iwx_rx_packet *);
 void	iwx_rx_pkt(struct iwx_softc *, struct iwx_rx_data *,
 	    struct mbuf_list *);
@@ -3358,7 +3355,6 @@ iwx_rx_ba_session_expired(void *arg)
 		if (timercmp(&now, &expiry, <)) {
 			timeout_add_usec(&rxba->session_timer, rxba->timeout);
 		} else {
-			ic->ic_stats.is_ht_rx_ba_timeout++;
 			ieee80211_delba_request(ic, ni,
 			    IEEE80211_REASON_TIMEOUT, 0, rxba->tid);
 		}
@@ -3398,7 +3394,7 @@ iwx_rx_bar_frame_release(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 
 	nssn = le32toh(release->ba_info) & IWX_BAR_FRAME_RELEASE_NSSN_MASK;
 	buf = &rxba->reorder_buf;
-	iwx_release_frames(sc, ni, rxba, buf, nssn, ml);
+	iwx_release_frames(sc, ni, rxba, buf, nssn);
 }
 
 #define IWX_MAX_RX_BA_SESSIONS 16
@@ -4707,8 +4703,7 @@ iwx_get_noise(const struct iwx_statistics_rx_non_phy *stats)
 void
 iwx_rx_frame(struct iwx_softc *sc, struct mbuf *m, int chanidx,
     uint32_t rx_pkt_status, int is_shortpre, int rate_n_flags,
-    uint32_t device_timestamp, struct ieee80211_rxinfo *rxi,
-    struct mbuf_list *ml)
+    uint32_t device_timestamp, int rssi, int ampdu_done)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_frame *wh;
@@ -4741,7 +4736,7 @@ iwx_rx_frame(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 		if (ic->ic_curmode != IEEE80211_MODE_11AC)
 			chan_flags &= ~IEEE80211_CHAN_VHT;
 		tap->wr_chan_flags = htole16(chan_flags);
-		tap->wr_dbm_antsignal = (int8_t)rxi->rxi_rssi;
+		tap->wr_dbm_antsignal = (int8_t)rssi;
 		tap->wr_dbm_antnoise = (int8_t)sc->sc_noise;
 		tap->wr_tsft = device_timestamp;
 		if (sc->sc_rate_n_flags_version >= 2) {
@@ -4798,8 +4793,11 @@ iwx_rx_frame(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 		    m, BPF_DIRECTION_IN);
 	}
 #endif
-	ieee80211_inputm(IC2IFP(ic), m, ni, rxi, ml);
-	ieee80211_release_node(ic, ni);
+	if (ampdu_done)
+		ieee80211_input_ampdu_done(ic, m, ni, rssi, device_timestamp);
+	else
+		ieee80211_input(ic, m, ni, rssi, device_timestamp);
+	ieee80211_free_node(ni);
 }
 
 /*
@@ -4810,7 +4808,7 @@ iwx_rx_frame(struct iwx_softc *sc, struct mbuf *m, int chanidx,
  */
 int
 iwx_detect_duplicate(struct iwx_softc *sc, struct mbuf *m,
-    struct iwx_rx_mpdu_desc *desc, struct ieee80211_rxinfo *rxi)
+    struct iwx_rx_mpdu_desc *desc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct iwx_node *in = (void *)ic->ic_bss;
@@ -4843,17 +4841,6 @@ iwx_detect_duplicate(struct iwx_softc *sc, struct mbuf *m,
 	    dup_data->last_sub_frame[tid] >= subframe_idx)
 		return 1;
 
-	/*
-	 * Allow the same frame sequence number for all A-MSDU subframes
-	 * following the first subframe.
-	 * Otherwise these subframes would be discarded as replays.
-	 */
-	if (dup_data->last_seq[tid] == seq &&
-	    subframe_idx > dup_data->last_sub_frame[tid] &&
-	    (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU)) {
-		rxi->rxi_flags |= IEEE80211_RXI_SAME_SEQ;
-	}
-
 	dup_data->last_seq[tid] = seq;
 	dup_data->last_sub_frame[tid] = subframe_idx;
 
@@ -4863,7 +4850,7 @@ iwx_detect_duplicate(struct iwx_softc *sc, struct mbuf *m,
 void
 iwx_release_frames(struct iwx_softc *sc, struct ieee80211_node *ni,
     struct iwx_rxba_data *rxba, struct iwx_reorder_buffer *reorder_buf,
-    uint16_t nssn, struct mbuf_list *ml)
+    uint16_t nssn)
 {
 	struct iwx_reorder_buf_entry *entries = &rxba->entries[0];
 	uint16_t ssn = reorder_buf->head_sn;
@@ -4871,9 +4858,8 @@ iwx_release_frames(struct iwx_softc *sc, struct ieee80211_node *ni,
 	while (SEQ_LT(ssn, nssn)) {
 		int index = ssn % reorder_buf->buf_size;
 		struct mbuf *m;
-		int chanidx, is_shortpre;
+		int chanidx, is_shortpre, rssi;
 		uint32_t rx_pkt_status, rate_n_flags, device_timestamp;
-		struct ieee80211_rxinfo *rxi;
 
 		/* This data is the same for all A-MSDU subframes. */
 		chanidx = entries[index].chanidx;
@@ -4881,7 +4867,7 @@ iwx_release_frames(struct iwx_softc *sc, struct ieee80211_node *ni,
 		is_shortpre = entries[index].is_shortpre;
 		rate_n_flags = entries[index].rate_n_flags;
 		device_timestamp = entries[index].device_timestamp;
-		rxi = &entries[index].rxi;
+		rssi = entries[index].rssi;
 
 		/*
 		 * Empty the list. Will have more than one frame for A-MSDU.
@@ -4890,16 +4876,8 @@ iwx_release_frames(struct iwx_softc *sc, struct ieee80211_node *ni,
 		 */
 		while ((m = ml_dequeue(&entries[index].frames)) != NULL) {
 			iwx_rx_frame(sc, m, chanidx, rx_pkt_status, is_shortpre,
-			    rate_n_flags, device_timestamp, rxi, ml);
+			    rate_n_flags, device_timestamp, rssi, 1);
 			reorder_buf->num_stored--;
-
-			/*
-			 * Allow the same frame sequence number and CCMP PN for
-			 * all A-MSDU subframes following the first subframe.
-			 * Otherwise they would be discarded as replays.
-			 */
-			rxi->rxi_flags |= IEEE80211_RXI_SAME_SEQ;
-			rxi->rxi_flags |= IEEE80211_RXI_HWDEC_SAME_PN;
 		}
 
 		ssn = (ssn + 1) & 0xfff;
@@ -4915,8 +4893,7 @@ iwx_release_frames(struct iwx_softc *sc, struct ieee80211_node *ni,
 int
 iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
     struct iwx_rx_mpdu_desc *desc, int is_shortpre, int rate_n_flags,
-    uint32_t device_timestamp, struct ieee80211_rxinfo *rxi,
-    struct mbuf_list *ml)
+    uint32_t device_timestamp, int rssi)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_frame *wh;
@@ -4969,8 +4946,6 @@ iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 	if (rxba->timeout != 0)
 		getmicrouptime(&rxba->last_rx);
 
-	/* Bypass A-MPDU re-ordering in net80211. */
-	rxi->rxi_flags |= IEEE80211_RXI_AMPDU_DONE;
 
 	nssn = reorder_data & IWX_RX_MPDU_REORDER_NSSN_MASK;
 	sn = (reorder_data & IWX_RX_MPDU_REORDER_SN_MASK) >>
@@ -4988,7 +4963,7 @@ iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 	ni = ieee80211_find_rxnode(ic, wh);
 	if (type == IEEE80211_FC0_TYPE_CTL &&
 	    subtype == IEEE80211_FC0_SUBTYPE_BAR) {
-		iwx_release_frames(sc, ni, rxba, buffer, nssn, ml);
+		iwx_release_frames(sc, ni, rxba, buffer, nssn);
 		goto drop;
 	}
 
@@ -4998,7 +4973,6 @@ iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 
 	/* drop any outdated packets */
 	if (reorder_data & IWX_RX_MPDU_REORDER_BA_OLD_SN) {
-		ic->ic_stats.is_ht_rx_frame_below_ba_winstart++;
 		goto drop;
 	}
 
@@ -5006,7 +4980,7 @@ iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 	if (!buffer->num_stored && SEQ_LT(sn, nssn)) {
 		if (!is_amsdu || last_subframe)
 			buffer->head_sn = nssn;
-		ieee80211_release_node(ic, ni);
+		ieee80211_free_node(ni);
 		return 0;
 	}
 
@@ -5021,7 +4995,7 @@ iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 	if (!buffer->num_stored && sn == buffer->head_sn) {
 		if (!is_amsdu || last_subframe)
 			buffer->head_sn = (buffer->head_sn + 1) & 0xfff;
-		ieee80211_release_node(ic, ni);
+		ieee80211_free_node(ni);
 		return 0;
 	}
 
@@ -5033,7 +5007,7 @@ iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 		entries[index].is_shortpre = is_shortpre;
 		entries[index].rate_n_flags = rate_n_flags;
 		entries[index].device_timestamp = device_timestamp;
-		memcpy(&entries[index].rxi, rxi, sizeof(entries[index].rxi));
+		entries[index].rssi = rssi;
 	}
 
 	/* put in reorder buffer */
@@ -5052,23 +5026,22 @@ iwx_rx_reorder(struct iwx_softc *sc, struct mbuf *m, int chanidx,
 	 * release notification with up to date NSSN.
 	 */
 	if (!is_amsdu || last_subframe)
-		iwx_release_frames(sc, ni, rxba, buffer, nssn, ml);
+		iwx_release_frames(sc, ni, rxba, buffer, nssn);
 
-	ieee80211_release_node(ic, ni);
+	ieee80211_free_node(ni);
 	return 1;
 
 drop:
 	m_freem(m);
-	ieee80211_release_node(ic, ni);
+	ieee80211_free_node(ni);
 	return 1;
 }
 
 void
 iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
-    size_t maxlen, struct mbuf_list *ml)
+    size_t maxlen)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ieee80211_rxinfo rxi;
 	struct iwx_rx_mpdu_desc *desc;
 	uint32_t len, hdrlen, rate_n_flags, device_timestamp;
 	int rssi;
@@ -5148,8 +5121,6 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 		m_adj(m, 2);
 	}
 
-	memset(&rxi, 0, sizeof(rxi));
-
 	/*
 	 * Hardware de-aggregates A-MSDUs and copies the same MAC header
 	 * in place for each subframe. But it leaves the 'A-MSDU present'
@@ -5160,15 +5131,13 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 	 * Leaving this in place for now since some 9k/AX200 hybrids seem
 	 * to exist that we may eventually add support for.)
 	 *
-	 * And we must allow the same CCMP PN for subframes following the
-	 * first subframe. Otherwise they would be discarded as replays.
+	 * NB: subframes after the first share a CCMP PN, which the software
+	 * replay check in net80211 would reject. See the iwx port notes.
 	 */
 	if (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) {
 		struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
 		uint8_t subframe_idx = (desc->amsdu_info &
 		    IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK);
-		if (subframe_idx > 0)
-			rxi.rxi_flags |= IEEE80211_RXI_HWDEC_SAME_PN;
 		if (ieee80211_has_qos(wh) && ieee80211_has_addr4(wh) &&
 		    m->m_len >= sizeof(struct ieee80211_qosframe_addr4)) {
 			struct ieee80211_qosframe_addr4 *qwh4 = mtod(m,
@@ -5182,7 +5151,7 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 		}
 	}
 
-	if (iwx_detect_duplicate(sc, m, desc, &rxi)) {
+	if (iwx_detect_duplicate(sc, m, desc)) {
 		m_freem(m);
 		return;
 	}
@@ -5201,20 +5170,16 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, struct mbuf *m, void *pktdata,
 
 	rssi = iwx_rxmq_get_signal_strength(sc, desc);
 	rssi = (0 - IWX_MIN_DBM) + rssi;	/* normalize */
-	rssi = MIN(rssi, ic->ic_max_rssi);	/* clip to max. 100% */
-
-	rxi.rxi_rssi = rssi;
-	rxi.rxi_tstamp = device_timestamp;
-	rxi.rxi_chan = chanidx;
+	rssi = MIN(rssi, IWX_MAX_DBM - IWX_MIN_DBM);	/* clip to max */
 
 	if (iwx_rx_reorder(sc, m, chanidx, desc,
 	    (phy_info & IWX_RX_MPDU_PHY_SHORT_PREAMBLE),
-	    rate_n_flags, device_timestamp, &rxi, ml))
+	    rate_n_flags, device_timestamp, rssi))
 		return;
 
 	iwx_rx_frame(sc, m, chanidx, le32toh(desc->status),
 	    (phy_info & IWX_RX_MPDU_PHY_SHORT_PREAMBLE),
-	    rate_n_flags, device_timestamp, &rxi, ml);
+	    rate_n_flags, device_timestamp, rssi, 0);
 }
 
 void
@@ -5248,7 +5213,7 @@ iwx_txd_done(struct iwx_softc *sc, struct iwx_tx_data *txd)
 	txd->m = NULL;
 
 	KASSERT(txd->in);
-	ieee80211_release_node(ic, &txd->in->in_ni);
+	ieee80211_free_node(&txd->in->in_ni);
 	txd->in = NULL;
 }
 
@@ -9830,7 +9795,7 @@ iwx_start(struct ifnet *ifp)
 			bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
 #endif
 		if (iwx_tx(sc, m, ni) != 0) {
-			ieee80211_release_node(ic, ni);
+			ieee80211_free_node(ni);
 			ifp->if_oerrors++;
 			continue;
 		}
@@ -10389,7 +10354,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
 				/* No need to copy last frame in buffer. */
 				if (offset > 0)
 					m_adj(m0, offset);
-				iwx_rx_mpdu_mq(sc, m0, pkt->data, maxlen, ml);
+				iwx_rx_mpdu_mq(sc, m0, pkt->data, maxlen);
 				m0 = NULL; /* stack owns m0 now; abort loop */
 			} else {
 				/*
@@ -10405,7 +10370,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
 					break;
 				}
 				m_adj(m, offset);
-				iwx_rx_mpdu_mq(sc, m, pkt->data, maxlen, ml);
+				iwx_rx_mpdu_mq(sc, m, pkt->data, maxlen);
 			}
  			break;
 		}
@@ -10864,7 +10829,7 @@ iwx_notif_intr(struct iwx_softc *sc)
 		iwx_rx_pkt(sc, data, &ml);
 		sc->rxq.cur = (sc->rxq.cur + 1) % IWX_RX_MQ_RING_COUNT;
 	}
-	if_input(sc->sc_ic.ic_ifp, &ml);
+	if_input_ml(sc->sc_ic.ic_ifp, &ml);
 
 	/*
 	 * Tell the firmware what we have processed.
@@ -12124,7 +12089,6 @@ iwx_attach(struct device *parent, struct device *self, void *aux)
 	/* IBSS channel undefined for now. */
 	ic->ic_ibss_chan = &ic->ic_channels[1];
 
-	ic->ic_max_rssi = IWX_MAX_DBM - IWX_MIN_DBM;
 
 	ifp->if_softc = sc;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;

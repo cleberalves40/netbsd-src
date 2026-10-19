@@ -392,7 +392,7 @@ struct iwx_reorder_buf_entry {
 	int is_shortpre;
 	uint32_t rate_n_flags;
 	uint32_t device_timestamp;
-	struct ieee80211_rxinfo rxi;
+	int rssi;
 };
 
 /**
