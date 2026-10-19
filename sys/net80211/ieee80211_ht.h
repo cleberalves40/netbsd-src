@@ -47,6 +47,8 @@
 #define IEEE80211_BA_REQUESTED		1
 #define IEEE80211_BA_AGREED		2
 #define IEEE80211_BA_MAX_WINSZ		64	/* max ADDBA BUFSZ */
+#define	IEEE80211_BA_MAX_WINMISS	8	/* window misses before it moves */
+#define	IEEE80211_BA_GAP_TICKS		1	/* reorder gap timeout, seconds */
 
 /* Management frame subtype for action frames (absent from NetBSD) */
 #define IEEE80211_FC0_SUBTYPE_ACTION	0xd0

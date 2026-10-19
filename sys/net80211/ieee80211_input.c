@@ -378,6 +378,16 @@ out:
 	return -1;
 }
 
+/* A-MPDU receive reordering (see the end of this file). */
+static int	ieee80211_input_ba(struct ieee80211com *, struct mbuf **,
+	    struct ieee80211_node *, int, u_int16_t, int, u_int32_t);
+static void	ieee80211_input_ba_flush(struct ieee80211com *,
+	    struct ieee80211_node *, struct ieee80211_rx_ba *);
+static void	ieee80211_input_ba_seq(struct ieee80211com *,
+	    struct ieee80211_node *, struct ieee80211_rx_ba *, u_int16_t);
+static void	ieee80211_ba_move_window(struct ieee80211com *,
+	    struct ieee80211_node *, struct ieee80211_rx_ba *, u_int16_t);
+
 /*
  * Input code for a MANAGEMENT frame.
  */
@@ -726,6 +736,17 @@ ieee80211_input(struct ieee80211com *ic, struct mbuf *m,
 				goto out;
 			}
 			ni->ni_rxseqs[tid] = rxseq;
+
+			/*
+			 * A-MPDU reordering runs before decryption, as in
+			 * OpenBSD.  Frames it keeps are released later
+			 * through ieee80211_input_data().
+			 */
+			if (type == IEEE80211_FC0_TYPE_DATA &&
+			    ieee80211_has_qos(wh) &&
+			    ieee80211_input_ba(ic, &m, ni, tid, rxseq,
+			    rssi, rstamp))
+				return IEEE80211_FC0_TYPE_DATA;
 		}
 	}
 
@@ -3633,4 +3654,267 @@ ieee80211_recv_delba(struct ieee80211com *ic, struct mbuf *m,
 		ba->ba_ticks_left = 0;
 		ni->ni_addba_req_timer[tid] = 0;
 	}
+}
+
+/*
+ * Block ack receive reordering, ported from OpenBSD ieee80211_input_ba().
+ *
+ * Reordering runs before decryption, as in OpenBSD, so the held MPDUs are
+ * still 802.11 frames.  Released frames go back through
+ * ieee80211_input_data(), which decrypts and delivers them.
+ *
+ * The gap timeout is a tick countdown (ba_gap_ticks, decremented once a
+ * second by ieee80211_ba_tick()) rather than OpenBSD's 300 ms timeout, so
+ * a hole in the sequence can hold frames for up to a second longer.
+ */
+
+/* 12-bit sequence numbers: nonzero when a comes before b, modulo 4096. */
+#define BA_SEQ_LT(a, b)	((((a) - (b)) & 0xfff) >= 2048)
+
+/* Release the MPDU in the head slot of the reorder buffer. */
+static void
+ieee80211_ba_release_head(struct ieee80211com *ic, struct ieee80211_node *ni,
+    struct ieee80211_rx_ba *ba)
+{
+	struct mbuf *m = ba->ba_buf[ba->ba_head].m;
+
+	ni->ni_rssi = ba->ba_buf[ba->ba_head].rssi;
+	ni->ni_rstamp = ba->ba_buf[ba->ba_head].rstamp;
+	ba->ba_buf[ba->ba_head].m = NULL;
+	ba->ba_gapwait--;
+	if (ieee80211_input_data(ic, &m, ni) == -1 && m != NULL)
+		m_freem(m);
+}
+
+/* Move the head forward through buffered MPDUs with SN below max_seq. */
+static void
+ieee80211_input_ba_seq(struct ieee80211com *ic, struct ieee80211_node *ni,
+    struct ieee80211_rx_ba *ba, u_int16_t max_seq)
+{
+	struct ieee80211_frame *wh;
+	u_int16_t seq;
+	int i = 0;
+
+	while (i++ < ba->ba_winsize) {
+		/* gaps may exist */
+		if (ba->ba_buf[ba->ba_head].m != NULL) {
+			wh = mtod(ba->ba_buf[ba->ba_head].m,
+			    struct ieee80211_frame *);
+			seq = le16toh(*(u_int16_t *)wh->i_seq) >>
+			    IEEE80211_SEQ_SEQ_SHIFT;
+			if (!BA_SEQ_LT(seq, max_seq))
+				break;
+			ieee80211_ba_release_head(ic, ni, ba);
+		}
+		ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+		/* move window forward */
+		ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
+	}
+	ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+}
+
+/* Release consecutive frames from the head, then re-arm or stop the gap timer. */
+static void
+ieee80211_input_ba_flush(struct ieee80211com *ic, struct ieee80211_node *ni,
+    struct ieee80211_rx_ba *ba)
+{
+	/* Do not re-arm the gap timeout if we made no progress. */
+	if (ba->ba_buf[ba->ba_head].m == NULL)
+		return;
+
+	while (ba->ba_buf[ba->ba_head].m != NULL) {
+		ieee80211_ba_release_head(ic, ni, ba);
+		ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+		/* move window forward */
+		ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
+	}
+	ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+
+	if (ba->ba_gapwait) {
+		ba->ba_gap_ticks = IEEE80211_BA_GAP_TICKS;
+		ieee80211_ba_arm(ic);
+	} else
+		ba->ba_gap_ticks = 0;
+}
+
+/*
+ * Forcibly move the window past a leading gap that has held frames too
+ * long, as OpenBSD does.  Called from the gap timer.
+ */
+void
+ieee80211_input_ba_gap_timeout(struct ieee80211com *ic,
+    struct ieee80211_node *ni, int tid)
+{
+	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+	int skipped = 0;
+
+	ba->ba_gap_ticks = 0;
+	while (skipped < ba->ba_winsize &&
+	    ba->ba_buf[ba->ba_head].m == NULL) {
+		ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+		ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
+		skipped++;
+	}
+	if (skipped > 0) {
+		ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+		ieee80211_input_ba_flush(ic, ni, ba);
+	}
+}
+
+/*
+ * Change WinStartB on reception of a BlockAckReq or ADDBA request,
+ * releasing the MPDUs that fall before the new start.
+ */
+static void
+ieee80211_ba_move_window(struct ieee80211com *ic, struct ieee80211_node *ni,
+    struct ieee80211_rx_ba *ba, u_int16_t ssn)
+{
+	int count;
+
+	count = (ssn - ba->ba_winstart) & 0xfff;
+	if (count > ba->ba_winsize)	/* no overlap */
+		count = ba->ba_winsize;
+	while (count-- > 0) {
+		/* gaps may exist */
+		if (ba->ba_buf[ba->ba_head].m != NULL)
+			ieee80211_ba_release_head(ic, ni, ba);
+		ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+	}
+	/* move window forward */
+	ba->ba_winstart = ssn;
+	ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+
+	ieee80211_input_ba_flush(ic, ni, ba);
+}
+
+/*
+ * Take a received QoS data frame that belongs to a block ack agreement.
+ * Returns 1 when the frame was consumed (held, released, or dropped), in
+ * which case *mp is cleared, and 0 when the normal receive path handles it.
+ */
+static int
+ieee80211_input_ba(struct ieee80211com *ic, struct mbuf **mp,
+    struct ieee80211_node *ni, int tid, u_int16_t rxseq, int rssi,
+    u_int32_t rstamp)
+{
+	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+	struct ieee80211_qosframe *qwh;
+	u_int8_t ackpolicy;
+	u_int16_t sn = rxseq >> IEEE80211_SEQ_SEQ_SHIFT;
+	int idx, count;
+
+	qwh = mtod(*mp, struct ieee80211_qosframe *);
+	ackpolicy = qwh->i_qos[0] & IEEE80211_QOS_ACKPOLICY;
+
+	/* any QoS frame on an agreed TID refreshes the inactivity timer */
+	if (ba->ba_state == IEEE80211_BA_AGREED && ba->ba_timeout_val != 0)
+		ba->ba_ticks_left =
+		    (ba->ba_timeout_val + 999999) / 1000000;
+
+	if (ackpolicy == IEEE80211_QOS_ACKPOLICY_BA &&
+	    ba->ba_state != IEEE80211_BA_AGREED) {
+		/* no agreement: send a DELBA, as OpenBSD does */
+		(void)ieee80211_send_action(ic, ni, IEEE80211_CATEG_BA,
+		    IEEE80211_ACTION_DELBA,
+		    IEEE80211_REASON_SETUP_REQUIRED << 16 | tid);
+		goto drop;
+	}
+
+	/*
+	 * Only frames with an explicit or implicit Block Ack Request for a
+	 * valid agreement are reordered.  Frames on a TID whose agreement
+	 * is only requested are reordered when they carry Normal Ack.
+	 */
+	if (!((ba->ba_state == IEEE80211_BA_AGREED &&
+	    (ackpolicy == IEEE80211_QOS_ACKPOLICY_BA ||
+	    ackpolicy == IEEE80211_QOS_ACKPOLICY_NORMAL)) ||
+	    (ba->ba_state == IEEE80211_BA_REQUESTED &&
+	    ackpolicy == IEEE80211_QOS_ACKPOLICY_NORMAL)))
+		return 0;
+
+	/* SN < WinStartB: already released */
+	if (BA_SEQ_LT(sn, ba->ba_winstart))
+		goto drop;
+
+	if (BA_SEQ_LT(ba->ba_winend, sn)) {	/* WinEndB < SN */
+		count = (sn - ba->ba_winend) & 0xfff;
+		if (count > ba->ba_winsize) {
+			/*
+			 * Check whether we are consistently behind the
+			 * window, and let it move forward if necessary.
+			 */
+			if (ba->ba_winmiss < IEEE80211_BA_MAX_WINMISS) {
+				if (ba->ba_missedsn == ((sn - 1) & 0xfff))
+					ba->ba_winmiss++;
+				else
+					ba->ba_winmiss = 0;
+				ba->ba_missedsn = sn;
+				goto drop;
+			}
+			/* It appears the window has moved for real. */
+			ba->ba_winmiss = 0;
+			ba->ba_missedsn = 0;
+			ieee80211_ba_move_window(ic, ni, ba, sn);
+		} else {
+			ieee80211_input_ba_seq(ic, ni, ba,
+			    (ba->ba_winstart + count) & 0xfff);
+			ieee80211_input_ba_flush(ic, ni, ba);
+		}
+	}
+
+	/* WinStartB <= SN <= WinEndB */
+	ba->ba_winmiss = 0;
+	ba->ba_missedsn = 0;
+	idx = (sn - ba->ba_winstart) & 0xfff;
+	idx = (ba->ba_head + idx) % IEEE80211_BA_MAX_WINSZ;
+	if (ba->ba_buf[idx].m != NULL)		/* duplicate in the window */
+		goto drop;
+
+	ba->ba_buf[idx].m = *mp;
+	ba->ba_buf[idx].rssi = rssi;
+	ba->ba_buf[idx].rstamp = rstamp;
+	*mp = NULL;
+	ba->ba_gapwait++;
+
+	if (ba->ba_buf[ba->ba_head].m == NULL && ba->ba_gapwait == 1) {
+		ba->ba_gap_ticks = IEEE80211_BA_GAP_TICKS;
+		ieee80211_ba_arm(ic);
+	}
+
+	ieee80211_input_ba_flush(ic, ni, ba);
+	return 1;
+
+drop:
+	m_freem(*mp);
+	*mp = NULL;
+	if_statinc(ic->ic_ifp, if_ierrors);
+	return 1;
+}
+
+/*
+ * Drop the receive side of a block ack agreement for one TID.  MPDUs
+ * still held for reordering are freed, not delivered.
+ */
+void
+ieee80211_node_rx_ba_clear(struct ieee80211_node *ni, int tid)
+{
+	struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
+	int i;
+
+	if (ba->ba_buf != NULL) {
+		for (i = 0; i < IEEE80211_BA_MAX_WINSZ; i++) {
+			if (ba->ba_buf[i].m != NULL)
+				m_freem(ba->ba_buf[i].m);
+			ba->ba_buf[i].m = NULL;
+		}
+		free(ba->ba_buf, M_DEVBUF);
+		ba->ba_buf = NULL;
+	}
+	ba->ba_state = IEEE80211_BA_INIT;
+	ba->ba_gapwait = 0;
+	ba->ba_gap_ticks = 0;
+	ba->ba_ticks_left = 0;
+	ba->ba_winmiss = 0;
+	ba->ba_missedsn = 0;
+	ba->ba_head = 0;
 }

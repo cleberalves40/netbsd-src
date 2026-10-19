@@ -1383,6 +1383,14 @@ ieee80211_ba_node_tick(struct ieee80211com *ic, struct ieee80211_node *ni,
 				*pending = 1;
 		}
 
+		/* receive side: reorder gap timeout, one tick per second */
+		if (ni->ni_rx_ba[tid].ba_gap_ticks > 0) {
+			if (--ni->ni_rx_ba[tid].ba_gap_ticks == 0)
+				ieee80211_input_ba_gap_timeout(ic, ni, tid);
+			else
+				*pending = 1;
+		}
+
 		/* receive side: the peer's agreement inactivity timeout */
 		rba = &ni->ni_rx_ba[tid];
 		if (rba->ba_ticks_left > 0) {

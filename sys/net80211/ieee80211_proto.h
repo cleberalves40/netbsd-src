@@ -285,6 +285,9 @@ void	ieee80211_delba_request(struct ieee80211com *, struct ieee80211_node *,
 void	ieee80211_node_tx_ba_clear(struct ieee80211_node *, int);
 int	ieee80211_ba_tick(struct ieee80211com *);
 void	ieee80211_ba_arm(struct ieee80211com *);
+void	ieee80211_input_ba_gap_timeout(struct ieee80211com *,
+	    struct ieee80211_node *, int);
+void	ieee80211_node_rx_ba_clear(struct ieee80211_node *, int);
 void	ieee80211_ampdu_trigger(struct ieee80211com *, struct ieee80211_node *,
 	    int, u_int16_t);
 

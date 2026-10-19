@@ -1745,6 +1745,13 @@ _ieee80211_free_node(struct ieee80211_node *ni)
 		ether_sprintf(ni->ni_macaddr),
 		nt != NULL ? nt->nt_name : "<gone>");
 
+	{
+		int tid;
+
+		/* drop any MPDUs still held for reordering */
+		for (tid = 0; tid < IEEE80211_NUM_TID; tid++)
+			ieee80211_node_rx_ba_clear(ni, tid);
+	}
 	IEEE80211_AID_CLR(ni->ni_associd, ic->ic_aid_bitmap);
 	if (nt != NULL) {
 		TAILQ_REMOVE(&nt->nt_node, ni, ni_list);
